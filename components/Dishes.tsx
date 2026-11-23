@@ -12,7 +12,7 @@ function SlotSelect({ state, value, onChange, id }: { state: WeekState; value: s
       <option value="">Pas encore placé</option>
       {state.slots.filter((s) => s.active || s.id === value).map((s) => (
         <option key={s.id} value={s.id}>
-          {DAYS[s.day]} {MEALS[s.meal].toLowerCase()}{taken.has(s.id) && s.id !== value ? ` (${taken.get(s.id)})` : ""}
+          {DAYS[s.day]} {MEALS[s.meal].toLowerCase()}{!s.active ? " (plus prévu)" : taken.has(s.id) && s.id !== value ? ` (${taken.get(s.id)})` : ""}
         </option>
       ))}
     </select>
@@ -87,6 +87,9 @@ function DishCard({ dish, state, mutate }: { dish: Dish; state: WeekState; mutat
       </header>
 
       <SlotSelect state={state} value={dish.slot_id} onChange={(v) => mutate("dish.update", { id: dish.id, slot_id: v })} />
+      {state.slots.some((s) => s.id === dish.slot_id && !s.active) && (
+        <p className="warn" role="status">Ce repas n'est plus prévu cette semaine : choisissez un autre créneau.</p>
+      )}
 
       {ings.length > 0 && (
         <ul className="inglist">

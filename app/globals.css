@@ -206,6 +206,7 @@ select.input {
 .ingtotal { min-width: 4.5rem; text-align: right; }
 .perperson { display: inline-flex; align-items: center; gap: 4px; font-size: 0.8rem; color: var(--ink-2); }
 .perperson .qty { width: 4.2rem; min-height: 40px; padding: 0 6px; font-size: 16px; }
+.warn { background: var(--mustard); border-radius: var(--radius-sm); padding: 8px 12px; font-weight: 700; font-size: 0.95rem; }
 .picker { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
 
 /* ---------- Planning ---------- */
