@@ -86,13 +86,13 @@ export default function App({ userName, onLogout }: { userName: string; onLogout
         {!state || !tab ? (
           <div className="loading" aria-busy>Chargement de la semaine…</div>
         ) : tab === "semaine" ? (
-          <Settings state={state} mutate={mutate} onDone={() => setTab("courses")} />
+          <Settings state={state} mutate={mutate} me={userName} onDone={() => setTab("courses")} />
         ) : tab === "courses" ? (
           <Shopping state={state} mutate={mutate} />
         ) : tab === "plats" ? (
           <Dishes state={state} mutate={mutate} />
         ) : (
-          <Planning state={state} />
+          <Planning state={state} mutate={mutate} me={userName} />
         )}
       </main>
 

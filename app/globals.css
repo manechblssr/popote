@@ -17,14 +17,18 @@
 }
 
 * { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
   font: 400 17px/1.5 var(--f-body);
   -webkit-tap-highlight-color: transparent;
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
 }
+/* Supprime le délai et le zoom au double-tap sur les commandes */
+button, a, label, input, select { touch-action: manipulation; }
 h1, h2, h3 { font-family: var(--f-display); line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
 h1 { font-size: 2rem; font-weight: 800; }
 h2 { font-size: 1.25rem; font-weight: 700; }
@@ -58,12 +62,16 @@ button { cursor: pointer; }
 .iconbtn.small { width: 36px; height: 36px; font-size: 1.3rem; color: var(--ink-2); }
 
 .input {
+  -webkit-appearance: none; appearance: none; font-size: max(16px, 1em); /* < 16px : Safari zoome sur le champ */
   width: 100%; min-height: var(--tap); padding: 0 14px; border-radius: var(--radius-sm);
   border: 2px solid var(--line); background: var(--surface);
 }
 .input:focus { border-color: var(--ink); outline: none; }
 .input-xl { font-size: 1.4rem; min-height: 60px; text-align: center; }
-select.input { padding-right: 8px; }
+select.input {
+  padding-right: 30px; background-repeat: no-repeat; background-position: right 10px center; background-size: 12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%230f3b2e' stroke-width='2' fill='none'/%3E%3C/svg%3E");
+}
 .qty { width: 5.2rem; flex: none; text-align: center; }
 .unit { width: auto; flex: none; }
 .check { display: inline-flex; align-items: center; gap: 6px; font-size: 0.95rem; min-height: var(--tap); white-space: nowrap; }
@@ -71,7 +79,7 @@ select.input { padding-right: 8px; }
 
 /* ---------- Écran d'entrée ---------- */
 .gate {
-  min-height: 100dvh; display: flex; flex-direction: column; justify-content: center; gap: 40px;
+  min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; justify-content: center; gap: 40px;
   padding: 32px 24px calc(32px + env(safe-area-inset-bottom)); max-width: 440px; margin: 0 auto;
 }
 .gate-brand {
@@ -87,7 +95,7 @@ select.input { padding-right: 8px; }
 @keyframes steam { 0%, 100% { transform: scaleY(0.4); opacity: 0.2; } 50% { transform: scaleY(1); opacity: 0.8; } }
 
 /* ---------- Coque ---------- */
-.shell { min-height: 100dvh; display: flex; flex-direction: column; }
+.shell { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; }
 .topbar {
   position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 4px;
   padding: calc(6px + env(safe-area-inset-top)) 8px 6px; background: var(--ink); color: #fff;
@@ -101,9 +109,14 @@ select.input { padding-right: 8px; }
 }
 .banner { background: var(--mustard); padding: 10px 16px; font-weight: 700; font-size: 0.95rem; }
 .banner-error { background: var(--tomato); color: #fff; cursor: pointer; }
-.content { flex: 1; width: 100%; max-width: 640px; margin: 0 auto; padding: 16px 14px calc(96px + env(safe-area-inset-bottom)); }
+.content {
+  flex: 1; width: 100%; max-width: 640px; margin: 0 auto;
+  padding: 16px max(14px, env(safe-area-inset-right)) calc(96px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+}
 .loading { padding: 48px 0; text-align: center; color: var(--ink-2); }
 
+/* Clavier ouvert : la barre d'onglets se cache pour ne pas couvrir le champ (Chrome Android la remonte sinon) */
+.shell:has(input:not([type="checkbox"]):focus, select:focus) .tabbar { display: none; }
 .tabbar {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 10; display: grid; grid-template-columns: repeat(4, 1fr);
   background: var(--surface); border-top: 2px solid var(--line); padding-bottom: env(safe-area-inset-bottom);
@@ -144,15 +157,20 @@ select.input { padding-right: 8px; }
 .seg-note.on { color: var(--ink); font-weight: 700; }
 
 /* ---------- Semaine ---------- */
-.slotgrid { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
-.slotgrid li { display: grid; grid-template-columns: 6.2rem 1fr 1fr; gap: 8px; align-items: start; padding: 10px 0; border-top: 1px solid var(--line); }
-.slotday { display: flex; flex-direction: column; line-height: 1.2; padding-top: 10px; }
-.slotday span { font-size: 0.8rem; color: var(--ink-2); }
-.slotcell { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
-.slottoggle { min-height: 44px; border-radius: var(--radius-sm); border: 2px dashed var(--line); background: none; color: var(--ink-2); font-weight: 700; }
-.slotcell.on .slottoggle { border: 2px solid var(--ink); background: var(--ink); color: #fff; }
-.slotpeople .stepper { width: 100%; justify-content: space-between; }
-.slotpeople .stepper button { width: 36px; height: 34px; }
+.daygrid { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.daygrid li { display: grid; grid-template-columns: 3.4rem 1fr 1fr; gap: 8px; align-items: stretch; }
+.daygrid-day { display: flex; flex-direction: column; justify-content: center; font-weight: 700; line-height: 1.1; }
+.daygrid-day small { font-weight: 400; font-size: 0.8rem; color: var(--ink-2); }
+.cell {
+  min-height: 52px; border-radius: var(--radius-sm); border: 2px dashed var(--line); background: none; color: var(--ink-2);
+  font-weight: 700; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.15; padding: 4px;
+}
+.cell small { font-weight: 400; font-size: 0.8rem; }
+.cell.on { border: 2px solid var(--ink); background: var(--ink); color: #fff; }
+.cell.me { border-style: solid; color: var(--ink); }
+.cell.me.on { background: var(--tomato); border-color: var(--tomato); color: #fff; }
+.cell.ghost { border: 0; }
+.btn.small { min-height: 40px; padding: 0 14px; font-size: 0.95rem; }
 
 /* ---------- Courses ---------- */
 .items { list-style: none; margin: 0; padding: 0; }
@@ -187,7 +205,7 @@ select.input { padding-right: 8px; }
 .ingname { font-weight: 700; }
 .ingtotal { min-width: 4.5rem; text-align: right; }
 .perperson { display: inline-flex; align-items: center; gap: 4px; font-size: 0.8rem; color: var(--ink-2); }
-.perperson .qty { width: 4.2rem; min-height: 40px; padding: 0 6px; }
+.perperson .qty { width: 4.2rem; min-height: 40px; padding: 0 6px; font-size: 16px; }
 .picker { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
 
 /* ---------- Planning ---------- */
@@ -201,6 +219,13 @@ select.input { padding-right: 8px; }
 .pmeal { background: var(--surface); border-radius: var(--radius-lg); padding: 14px 16px; border-left: 6px solid var(--ink); }
 .pmeal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .pmeal-name { font-weight: 700; color: var(--ink-2); }
+.eaters { font-weight: 700; margin-bottom: 8px; }
+.people-badge.est { background: var(--sage); }
+.presence { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 10px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+.btn-here { border-color: var(--tomato); color: var(--tomato); background: none; }
+.btn-here.on { background: var(--tomato); color: #fff; }
+.guests { display: inline-flex; align-items: center; gap: 8px; font-size: 0.9rem; color: var(--ink-2); }
+.guests .stepper button { width: 38px; height: 38px; }
 .pdish + .pdish { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .pdish h3 { font-size: 1.4rem; margin-bottom: 6px; }
 .pdish ul { list-style: none; margin: 0; padding: 0; }
@@ -209,6 +234,16 @@ select.input { padding-right: 8px; }
 
 @media (prefers-reduced-motion: reduce) {
   .steam span { animation: none; opacity: 0.6; }
+}
+@media (max-width: 360px) {
+  body { font-size: 16px; }
+  .daygrid li { grid-template-columns: 2.8rem 1fr 1fr; gap: 6px; }
+  .inglist li { grid-template-columns: 1fr auto auto; }
+  .inglist .ingname { grid-column: 1 / -1; }
+  .pday-title { font-size: 2.2rem; }
+}
+@media (hover: hover) {
+  .chip:hover, .btn-ghost:hover { background: var(--sage); }
 }
 @media (min-width: 720px) {
   .content { padding-top: 24px; }

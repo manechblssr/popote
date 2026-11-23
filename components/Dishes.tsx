@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { dishPeople } from "@/lib/compute";
+import { headcount } from "@/lib/compute";
 import { DAYS, MEALS, UNITS, fmtAmount, nameKey, type Dish, type WeekState } from "@/lib/types";
 import type { Mutate } from "./App";
 import { Empty } from "./ui";
@@ -55,7 +55,8 @@ export default function Dishes({ state, mutate }: { state: WeekState; mutate: Mu
 }
 
 function DishCard({ dish, state, mutate }: { dish: Dish; state: WeekState; mutate: Mutate }) {
-  const people = dishPeople(state, dish);
+  const hc = headcount(state, dish.slot_id);
+  const people = hc.count;
   const ings = state.ingredients.filter((i) => i.dish_id === dish.id);
   const [search, setSearch] = useState("");
   const [newUnit, setNewUnit] = useState("g");
@@ -82,7 +83,7 @@ function DishCard({ dish, state, mutate }: { dish: Dish; state: WeekState; mutat
         ) : (
           <h3><button className="linkbtn title" onClick={() => setRenaming(true)} aria-label={`Renommer ${dish.name}`}>{dish.name}</button></h3>
         )}
-        <span className="people-badge" title="Convives">{people} pers.</span>
+        <span className={hc.estimated ? "people-badge est" : "people-badge"} title={hc.estimated ? "Estimation : personne n'a encore coché ce repas" : "Convives"}>{hc.estimated ? "≈ " : ""}{people} pers.</span>
       </header>
 
       <SlotSelect state={state} value={dish.slot_id} onChange={(v) => mutate("dish.update", { id: dish.id, slot_id: v })} />

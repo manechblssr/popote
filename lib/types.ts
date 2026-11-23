@@ -2,7 +2,8 @@ export type Meal = "lunch" | "dinner";
 export type Source = "courses" | "placard";
 
 export interface Week { id: string; week_start: string; default_people: number; configured: boolean }
-export interface Slot { id: string; week_id: string; day: number; meal: Meal; active: boolean; people: number | null }
+export interface Slot { id: string; week_id: string; day: number; meal: Meal; active: boolean; guests: number }
+export interface Attendance { slot_id: string; name_key: string; name: string }
 export interface Item {
   id: string; week_id: string; name: string; source: Source; quantity: number | null;
   unit: string; per_person: boolean; checked: boolean; created_at: string;
@@ -12,7 +13,7 @@ export interface DishIngredient { id: string; dish_id: string; item_id: string; 
 export interface Recent { name_key: string; name: string; source: Source; unit: string; quantity: number | null; per_person: boolean; last_week: string; uses: number }
 
 export interface WeekState {
-  week: Week; slots: Slot[]; items: Item[]; dishes: Dish[]; ingredients: DishIngredient[]; recents: Recent[];
+  week: Week; slots: Slot[]; attendance: Attendance[]; items: Item[]; dishes: Dish[]; ingredients: DishIngredient[]; recents: Recent[];
 }
 
 export const DAYS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
@@ -43,9 +44,6 @@ export function dayLabel(weekStart: string, day: number): string {
   return new Date(y, m - 1, d).toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
 }
 
-export function slotPeople(slot: Slot | undefined, week: Week): number {
-  return slot?.people ?? week.default_people;
-}
 
 /** Arrondi lisible : 0,25 · 1,5 · 120 · 1 250 */
 export function fmtQty(q: number): string {

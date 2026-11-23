@@ -82,6 +82,7 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, status TEXT NOT NULL, created_at TEXT NOT NULL, decided_at TEXT, last_seen TEXT);
 CREATE TABLE IF NOT EXISTS weeks (id TEXT PRIMARY KEY, week_start TEXT NOT NULL UNIQUE, default_people INTEGER NOT NULL DEFAULT 4, configured INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS slots (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, day INTEGER NOT NULL, meal TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, people INTEGER, UNIQUE (week_id, day, meal));
+CREATE TABLE IF NOT EXISTS attendance (slot_id TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (slot_id, name_key));
 CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, quantity REAL, unit TEXT NOT NULL DEFAULT '', per_person INTEGER NOT NULL DEFAULT 0, checked INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS items_week ON items(week_id);
 CREATE TABLE IF NOT EXISTS dishes (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, name TEXT NOT NULL, slot_id TEXT, created_at TEXT NOT NULL);
@@ -105,6 +106,10 @@ export class Family extends DurableObject<Env> {
     this.botToken = (env.TELEGRAM_BOT_TOKEN ?? "").trim();
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
+    // Migration : nombre d'invités par repas (la présence des membres est cochée par chacun)
+    if (!this.q("PRAGMA table_info(slots)").some((c) => c.name === "guests")) {
+      this.sql.exec("ALTER TABLE slots ADD COLUMN guests INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   q(query: string, ...args: SqlStorageValue[]): Row[] {
@@ -126,10 +131,10 @@ export class Family extends DurableObject<Env> {
           return json(this.state(this.weekParam(url.searchParams.get("week"))));
         }
         case "POST /api/data": {
-          await this.member(req);
+          const dev = await this.member(req);
           const b = (await req.json()) as Body;
           const week = this.weekParam(b.week);
-          this.ctx.storage.transactionSync(() => this.apply(this.ensureWeek(week), b));
+          this.ctx.storage.transactionSync(() => this.apply(this.ensureWeek(week), b, String(dev.name)));
           this.notifyFamily(week);
           return json(this.state(week));
         }
@@ -165,7 +170,7 @@ export class Family extends DurableObject<Env> {
     if (typeof b.token !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(b.token)) throw new Bad("Appareil non reconnu, rechargez la page.");
     const hash = await sha256(b.token);
     const existing = this.one("SELECT * FROM devices WHERE token_hash = ?", hash);
-    const sameName = existing && String(existing.name).toLowerCase() === name.toLowerCase();
+    const sameName = existing && nameKey(String(existing.name)) === nameKey(name);
 
     if (existing && sameName && existing.status === "approved") {
       this.sql.exec("UPDATE devices SET last_seen = ? WHERE id = ?", now(), existing.id);
@@ -184,10 +189,12 @@ export class Family extends DurableObject<Env> {
     else this.sql.exec("INSERT INTO devices (id, name, token_hash, status, created_at) VALUES (?, ?, ?, 'pending', ?)", id, name, hash, now());
 
     if (!this.admin) throw new Bad("Veuillez patienter.", 503);
+    // Même prénom qu'un membre déjà accepté : c'est la même personne sur un autre appareil
+    const known = this.q("SELECT name FROM devices WHERE status = 'approved' AND id != ?", id).some((d) => nameKey(String(d.name)) === nameKey(name));
     const sent = await this.tg("sendMessage", {
       chat_id: this.admin,
       parse_mode: "HTML",
-      text: `🍲 Nouvelle demande d'accès à Popote\n\n👤 Prénom : <b>${esc(name)}</b>\n📱 Depuis un nouvel appareil`,
+      text: `🍲 Nouvelle demande d'accès à Popote\n\n👤 Prénom : <b>${esc(name)}</b>\n📱 ${known ? "Déjà membre, se connecte depuis un nouvel appareil" : "Première connexion"}`,
       reply_markup: {
         inline_keyboard: [[
           { text: `✅ Accepter ${name}`.slice(0, 60), callback_data: `ok:${id}` },
@@ -346,6 +353,7 @@ export class Family extends DurableObject<Env> {
     return {
       week: { ...w, configured: bool(w.configured) },
       slots: this.q("SELECT * FROM slots WHERE week_id = ? ORDER BY day, meal DESC", wid).map((r) => ({ ...r, active: bool(r.active) })),
+      attendance: this.q("SELECT a.slot_id, a.name_key, a.name FROM attendance a JOIN slots s ON s.id = a.slot_id WHERE s.week_id = ? ORDER BY a.name", wid),
       items, dishes, ingredients, recents,
     };
   }
@@ -378,9 +386,27 @@ export class Family extends DurableObject<Env> {
     this.sql.exec(`UPDATE ${table} SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE ${where}`, ...keys.map((k) => fields[k]), ...args);
   }
 
-  apply(week: Row, b: Body) {
+  /** Créneau de la semaine, ou erreur. */
+  slotOf(v: unknown, w: string) {
+    const s = this.one("SELECT id FROM slots WHERE id = ? AND week_id = ?", idOf(v), w);
+    if (!s) throw new Bad("Créneau introuvable");
+    return String(s.id);
+  }
+
+  setPresence(slotId: string, me: string, present: boolean) {
+    if (present) this.sql.exec("INSERT OR IGNORE INTO attendance (slot_id, name_key, name) VALUES (?, ?, ?)", slotId, nameKey(me), me);
+    else this.sql.exec("DELETE FROM attendance WHERE slot_id = ? AND name_key = ?", slotId, nameKey(me));
+  }
+
+  apply(week: Row, b: Body, me: string) {
     const w = String(week.id);
     switch (b.op) {
+      // Chacun ne coche ou décoche que sa propre présence (identité = prénom de l'appareil validé)
+      case "attend.set":
+        return this.setPresence(this.slotOf(b.slot_id, w), me, b.present === true);
+      case "attend.all":
+        for (const s of this.q("SELECT id FROM slots WHERE week_id = ? AND active = 1", w)) this.setPresence(String(s.id), me, b.present === true);
+        return;
       case "week.update": {
         const f: Record<string, SqlStorageValue> = {};
         if (b.default_people !== undefined) f.default_people = peopleOf(b.default_people) ?? week.default_people;
@@ -393,7 +419,7 @@ export class Family extends DurableObject<Env> {
       case "slot.update": {
         const f: Record<string, SqlStorageValue> = {};
         if (typeof b.active === "boolean") f.active = b.active ? 1 : 0;
-        if ("people" in b) f.people = peopleOf(b.people);
+        if ("guests" in b) f.guests = Math.round(num(b.guests, 0, 30) ?? 0);
         return this.patch("slots", f, "id = ? AND week_id = ?", idOf(b.id), w);
       }
       case "item.add":

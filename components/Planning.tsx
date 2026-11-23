@@ -1,11 +1,14 @@
 "use client";
-import { DAYS, MEALS, dayLabel, fmtAmount, slotPeople, type WeekState } from "@/lib/types";
-import { Empty } from "./ui";
+import { eatersLabel, headcount } from "@/lib/compute";
+import { DAYS, MEALS, dayLabel, fmtAmount, nameKey, type WeekState } from "@/lib/types";
+import type { Mutate } from "./App";
+import { Empty, Stepper } from "./ui";
 
-export default function Planning({ state }: { state: WeekState }) {
-  const { week, slots, dishes, ingredients, items } = state;
+export default function Planning({ state, mutate, me }: { state: WeekState; mutate: Mutate; me: string }) {
+  const { week, slots, dishes, ingredients, items, attendance } = state;
   const active = slots.filter((s) => s.active);
-  if (active.length === 0) return <Empty>Aucun repas actif cette semaine. Activez des créneaux dans l'onglet Semaine.</Empty>;
+  if (active.length === 0) return <Empty>Aucun repas prévu cette semaine. Choisissez les créneaux dans l'onglet Semaine.</Empty>;
+  const myKey = nameKey(me);
 
   return (
     <div className="planning">
@@ -16,16 +19,31 @@ export default function Planning({ state }: { state: WeekState }) {
           <section key={d} className="pday">
             <h2 className="pday-title">{d} <span>{dayLabel(week.week_start, day)}</span></h2>
             {daySlots.map((s) => {
-              const people = slotPeople(s, week);
+              const h = headcount(state, s.id);
+              const here = attendance.some((a) => a.slot_id === s.id && a.name_key === myKey);
               const planned = dishes.filter((x) => x.slot_id === s.id);
               return (
                 <div key={s.id} className="pmeal">
                   <div className="pmeal-head">
                     <span className="pmeal-name">{MEALS[s.meal]}</span>
-                    <span className="people-badge">{people} pers.</span>
+                    <span className={h.estimated ? "people-badge est" : "people-badge"} title={h.estimated ? "Estimation" : undefined}>
+                      {h.estimated ? "≈ " : ""}{h.count} pers.
+                    </span>
+                  </div>
+                  <p className="eaters">{eatersLabel(h)}</p>
+                  <div className="presence">
+                    <button className={here ? "btn small btn-here on" : "btn small btn-here"} aria-pressed={here}
+                      onClick={() => mutate("attend.set", { slot_id: s.id, present: !here })}>
+                      {here ? "✓ Je mange ici" : "Je mange ici"}
+                    </button>
+                    <span className="guests">
+                      Invités
+                      <Stepper label={`Invités ${d} ${MEALS[s.meal]}`} min={0} max={30} value={s.guests ?? 0}
+                        onChange={(v) => mutate("slot.update", { id: s.id, guests: v })} />
+                    </span>
                   </div>
                   {planned.length === 0 ? (
-                    <p className="muted">Rien de prévu.</p>
+                    <p className="muted">Aucun plat prévu.</p>
                   ) : planned.map((dish) => (
                     <div key={dish.id} className="pdish">
                       <h3>{dish.name}</h3>
@@ -36,7 +54,7 @@ export default function Planning({ state }: { state: WeekState }) {
                           return (
                             <li key={ing.id}>
                               <span>{item.name}</span>
-                              <b>{ing.qty_per_person ? fmtAmount(ing.qty_per_person * people, item.unit) : "à doser"}</b>
+                              <b>{ing.qty_per_person ? fmtAmount(ing.qty_per_person * h.count, item.unit) : "à doser"}</b>
                             </li>
                           );
                         })}
