@@ -18,10 +18,36 @@ export interface Exclusion { ingredient_id: string; name_key: string; name: stri
 /** Repas d'une des 3 semaines planifiables (avec les plats déjà placés). */
 export interface PlanSlot { id: string; day: number; meal: Meal; active: boolean; taken: string[] }
 export interface PlanWeek { week_start: string; slots: PlanSlot[] }
+/* ---------- Ingrédients permanents, classés par thème ---------- */
+export type Theme = "proteine" | "feculent" | "legume" | "sauce" | "epice";
+export const THEMES: { id: Theme; label: string }[] = [
+  { id: "proteine", label: "Protéines" },
+  { id: "feculent", label: "Féculents et glucides" },
+  { id: "legume", label: "Légumes" },
+  { id: "sauce", label: "Sauces et matières grasses" },
+  { id: "epice", label: "Épices et aromates" },
+];
+export const isTheme = (v: unknown): v is Theme => THEMES.some((t) => t.id === v);
+export interface Staple { name_key: string; name: string; theme: Theme; unit: string; qty_per_person: number }
+
+/** Liste de départ (modifiable ensuite dans l'appli). Quantités indicatives pour une personne. */
+export const DEFAULT_STAPLES: [string, Theme, number, string][] = [
+  ["Cordon bleu", "proteine", 1, "pièce"], ["Steak haché", "proteine", 1, "pièce"], ["Bœuf haché", "proteine", 120, "g"],
+  ["Lentilles", "proteine", 200, "g"], ["Haricots rouges", "proteine", 80, "g"],
+  ["Pâtes", "feculent", 100, "g"], ["Riz", "feculent", 75, "g"], ["Quinoa", "feculent", 70, "g"], ["Boulgour", "feculent", 70, "g"],
+  ["Pain burger", "feculent", 1, "pièce"],
+  ["Oignons", "legume", 0.5, "pièce"], ["Petits pois", "legume", 80, "g"], ["Ratatouille", "legume", 150, "g"],
+  ["Haricots verts", "legume", 120, "g"], ["Brocolis", "legume", 150, "g"], ["Épinards", "legume", 120, "g"],
+  ["Crème moutarde", "sauce", 2, "c. à s."], ["Sauce tomate", "sauce", 80, "g"], ["Pesto", "sauce", 1, "c. à s."],
+  ["Bouillon de légumes", "sauce", 0.5, "cube"], ["Huile d'olive", "sauce", 1, "c. à s."],
+  ["Ail", "epice", 1, "gousse"], ["Curry", "epice", 1, "c. à c."], ["Curcuma", "epice", 0.5, "c. à c."], ["Cumin", "epice", 0.5, "c. à c."],
+  ["Coriandre", "epice", 1, "c. à c."], ["Paprika", "epice", 0.5, "c. à c."],
+];
+
 export interface LibraryDish { name_key: string; name: string; ingredients: DraftIngredient[] }
 
 export interface WeekState {
-  week: Week; slots: Slot[]; attendance: Attendance[]; items: Item[]; dishes: Dish[]; ingredients: DishIngredient[]; recents: Recent[]; library: LibraryDish[]; exclusions: Exclusion[]; plan: PlanWeek[];
+  week: Week; slots: Slot[]; attendance: Attendance[]; items: Item[]; dishes: Dish[]; ingredients: DishIngredient[]; recents: Recent[]; library: LibraryDish[]; exclusions: Exclusion[]; plan: PlanWeek[]; staples: Staple[];
 }
 
 /* ---------- Rayons des courses ---------- */
@@ -58,7 +84,7 @@ export function guessCategory(name: string): Category {
 
 export const DAYS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
 export const MEALS: Record<Meal, string> = { lunch: "Midi", dinner: "Soir" };
-export const UNITS = ["", "g", "kg", "ml", "cl", "L", "pièce", "tranche", "c. à s.", "c. à c.", "pincée", "boîte", "paquet", "botte"];
+export const UNITS = ["", "g", "kg", "ml", "cl", "L", "pièce", "tranche", "c. à s.", "c. à c.", "pincée", "gousse", "cube", "boîte", "paquet", "botte"];
 
 /** Lundi (YYYY-MM-DD) de la semaine contenant `d`, en heure locale. */
 export function mondayOf(d: Date = new Date()): string {

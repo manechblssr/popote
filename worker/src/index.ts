@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { addDays as addDaysIso, guessCategory, isCategory, isMonday, nameKey, type Category } from "../../lib/types";
+import { DEFAULT_STAPLES, addDays as addDaysIso, guessCategory, isCategory, isMonday, isTheme, nameKey, type Category } from "../../lib/types";
 
 export interface Env {
   FAMILY: DurableObjectNamespace<Family>;
@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS weeks (id TEXT PRIMARY KEY, week_start TEXT NOT NULL 
 CREATE TABLE IF NOT EXISTS slots (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, day INTEGER NOT NULL, meal TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, people INTEGER, UNIQUE (week_id, day, meal));
 CREATE TABLE IF NOT EXISTS attendance (slot_id TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (slot_id, name_key));
 CREATE TABLE IF NOT EXISTS exclusions (ingredient_id TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (ingredient_id, name_key));
+CREATE TABLE IF NOT EXISTS staples (name_key TEXT PRIMARY KEY, name TEXT NOT NULL, theme TEXT NOT NULL, unit TEXT NOT NULL DEFAULT '', qty_per_person REAL NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, quantity REAL, unit TEXT NOT NULL DEFAULT '', per_person INTEGER NOT NULL DEFAULT 0, checked INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS items_week ON items(week_id);
 CREATE TABLE IF NOT EXISTS dishes (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, name TEXT NOT NULL, slot_id TEXT, created_at TEXT NOT NULL);
@@ -114,6 +116,13 @@ export class Family extends DurableObject<Env> {
     // Migration : rayon des courses
     this.addColumn("items", "category", "TEXT NOT NULL DEFAULT ''");
     this.addColumn("ingredient_memory", "category", "TEXT NOT NULL DEFAULT ''");
+    // Ingrédients permanents de départ, insérés une seule fois (ceux retirés ensuite ne reviennent pas)
+    if (!this.one("SELECT key FROM meta WHERE key = 'staples_seeded'")) {
+      for (const [name, theme, qty, unit] of DEFAULT_STAPLES) {
+        this.sql.exec("INSERT OR IGNORE INTO staples (name_key, name, theme, unit, qty_per_person) VALUES (?, ?, ?, ?, ?)", nameKey(name), name, theme, unit, qty);
+      }
+      this.sql.exec("INSERT INTO meta (key, value) VALUES ('staples_seeded', ?)", now());
+    }
   }
 
   addColumn(table: string, col: string, def: string) {
@@ -369,6 +378,7 @@ export class Family extends DurableObject<Env> {
         `SELECT e.ingredient_id, e.name_key, e.name FROM exclusions e JOIN dish_ingredients di ON di.id = e.ingredient_id
          JOIN dishes d ON d.id = di.dish_id WHERE d.week_id = ? ORDER BY e.name`, wid),
       plan: [0, 7, 14].map((n) => this.planWeek(addDaysIso(weekStart, n))),
+      staples: this.q("SELECT * FROM staples ORDER BY name"),
       library: this.library(),
     };
   }
@@ -550,6 +560,17 @@ export class Family extends DurableObject<Env> {
         return;
       }
       // « Je mange à ce repas mais pas cet ingrédient » : chacun pour soi
+      case "staple.add": {
+        const name = str(b.name, 60);
+        this.sql.exec(
+          `INSERT INTO staples (name_key, name, theme, unit, qty_per_person) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(name_key) DO UPDATE SET name = excluded.name, theme = excluded.theme, unit = excluded.unit, qty_per_person = excluded.qty_per_person`,
+          nameKey(name), name, isTheme(b.theme) ? b.theme : "proteine", unitOf(b.unit), num(b.qty_per_person) ?? 0,
+        );
+        return;
+      }
+      case "staple.delete":
+        return this.sql.exec("DELETE FROM staples WHERE name_key = ?", str(b.name_key));
       case "ing.exclude": {
         const ing = this.one("SELECT di.id FROM dish_ingredients di JOIN dishes d ON d.id = di.dish_id WHERE di.id = ? AND d.week_id = ?", idOf(b.id), w);
         if (!ing) throw new Bad("Ingrédient introuvable");

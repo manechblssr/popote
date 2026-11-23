@@ -1,64 +1,106 @@
 "use client";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { dishTitle, excludedFor, headcount, ingredientPeople } from "@/lib/compute";
 import {
-  DAYS, MEALS, UNITS, dayLabel, fmtAmount, guessCategory, nameKey,
-  type Category, type Dish, type DishIngredient, type DraftIngredient, type Meal, type Source, type WeekState,
+  DAYS, MEALS, THEMES, UNITS, dayLabel, fmtAmount, guessCategory, nameKey,
+  type Dish, type DishIngredient, type DraftIngredient, type Meal, type Theme, type WeekState,
 } from "@/lib/types";
 import type { Mutate } from "./App";
 import { Empty } from "./ui";
 
-type Known = Map<string, { name: string; unit: string; source: Source; category: Category }>;
 const MEAL_ORDER: Meal[] = ["lunch", "dinner"];
 const WEEK_LABELS = ["Cette semaine", "Semaine prochaine", "Dans 2 semaines"];
-
-/** Tous les ingrédients déjà connus (liste de la semaine, récents, plats déjà faits) pour l'autocomplétion. */
-function useKnown(state: WeekState): Known {
-  return useMemo(() => {
-    const m: Known = new Map();
-    const put = (x: { name: string; unit: string; source: Source; category: Category }) => { if (!m.has(nameKey(x.name))) m.set(nameKey(x.name), x); };
-    state.items.forEach(put);
-    state.recents.forEach(put);
-    state.library.forEach((d) => d.ingredients.forEach(put));
-    return m;
-  }, [state]);
-}
 
 const parseQty = (v: string) => { const n = Number(v.replace(",", ".")); return Number.isFinite(n) && n >= 0 ? n : 0; };
 const showQty = (n: number) => (n ? String(n).replace(".", ",") : "");
 
-/** Ligne « ajouter un ingrédient » : nom, quantité par personne, unité. */
-function IngredientAdder({ known, onAdd, exclude }: { known: Known; onAdd: (g: DraftIngredient) => void | Promise<unknown>; exclude?: Set<string> }) {
-  const listId = useId();
+type Option = DraftIngredient & { key: string };
+
+/** Ingrédients à cocher : ceux des courses de la semaine (« du marché ») et les permanents, par thème. */
+function useOptions(state: WeekState) {
+  return useMemo(() => {
+    // Quantité par personne déjà utilisée dans un plat passé, pour pré-remplir
+    const lastQty = new Map<string, { q: number; unit: string }>();
+    state.library.forEach((d) => d.ingredients.forEach((g) => {
+      if (g.qty_per_person && !lastQty.has(nameKey(g.name))) lastQty.set(nameKey(g.name), { q: g.qty_per_person, unit: g.unit });
+    }));
+    const market: Option[] = state.items.filter((i) => i.source === "courses").map((i) => {
+      const k = nameKey(i.name);
+      return { key: k, name: i.name, unit: i.unit || lastQty.get(k)?.unit || "", qty_per_person: lastQty.get(k)?.q ?? 0, source: "courses", category: i.category };
+    });
+    const byTheme = new Map<Theme, Option[]>();
+    for (const st of state.staples) {
+      const list = byTheme.get(st.theme) ?? [];
+      list.push({ key: st.name_key, name: st.name, unit: st.unit, qty_per_person: st.qty_per_person, source: "placard", category: guessCategory(st.name) });
+      byTheme.set(st.theme, list);
+    }
+    return { market, byTheme };
+  }, [state]);
+}
+
+function IngredientPicker({ state, selected, onToggle }: { state: WeekState; selected: Set<string>; onToggle: (o: Option) => void }) {
+  const { market, byTheme } = useOptions(state);
+  const chips = (list: Option[]) => (
+    <ul className="chips">
+      {list.map((o) => {
+        const on = selected.has(o.key);
+        return (
+          <li key={o.key}>
+            <button type="button" className={on ? "chip pick on" : "chip pick"} aria-pressed={on} onClick={() => onToggle(o)}>
+              {on ? "✓" : "+"} {o.name}
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+  return (
+    <div className="picker-groups">
+      <div>
+        <h4 className="group-title">Du marché <span className="muted small">(courses de la semaine)</span></h4>
+        {market.length ? chips(market) : <p className="muted small">Rien dans les courses de la semaine pour l'instant.</p>}
+      </div>
+      {THEMES.map((t) => byTheme.get(t.id)?.length ? (
+        <div key={t.id}>
+          <h4 className="group-title">{t.label}</h4>
+          {chips(byTheme.get(t.id)!)}
+        </div>
+      ) : null)}
+    </div>
+  );
+}
+
+/** Ajout d'un ingrédient permanent qui manque à la liste. */
+function StapleAdder({ mutate }: { mutate: Mutate }) {
+  const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [theme, setTheme] = useState<Theme>("proteine");
   const [qty, setQty] = useState("");
   const [unit, setUnit] = useState("g");
-  const match = known.get(nameKey(name));
-  useEffect(() => { if (match?.unit) setUnit(match.unit); }, [match?.unit]);
-
+  if (!open) return <button type="button" className="linkbtn" onClick={() => setOpen(true)}>+ Ajouter un ingrédient permanent</button>;
   async function add(e: React.FormEvent) {
     e.preventDefault();
-    const n = name.trim();
-    if (!n) return;
-    await onAdd({ name: match?.name ?? n, qty_per_person: parseQty(qty), unit, source: match?.source ?? "courses", category: match?.category ?? guessCategory(n) });
-    setName(""); setQty("");
+    if (!name.trim()) return;
+    if (await mutate("staple.add", { name, theme, unit, qty_per_person: parseQty(qty) })) { setName(""); setQty(""); setOpen(false); }
   }
-
   return (
     <form className="adder" onSubmit={add}>
-      <input className="input" placeholder="Ingrédient" aria-label="Ingrédient" list={listId}
-        value={name} onChange={(e) => setName(e.target.value)} maxLength={80} autoComplete="off" />
-      <datalist id={listId}>
-        {[...known.values()].filter((k) => !exclude?.has(nameKey(k.name))).map((k) => <option key={k.name} value={k.name} />)}
-      </datalist>
+      <strong>Nouvel ingrédient permanent</strong>
+      <input className="input" placeholder="Nom" aria-label="Nom de l'ingrédient permanent" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} />
+      <select className="input" aria-label="Thème" value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
+        {THEMES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+      </select>
       <div className="addrow">
-        <input className="input qty" inputMode="decimal" placeholder="Qté" aria-label="Quantité par personne" value={qty} onChange={(e) => setQty(e.target.value)} />
+        <input className="input qty" inputMode="decimal" placeholder="Qté" aria-label="Quantité habituelle par personne" value={qty} onChange={(e) => setQty(e.target.value)} />
         <select className="input unit" aria-label="Unité" value={unit} onChange={(e) => setUnit(e.target.value)}>
-          {(UNITS.includes(unit) ? UNITS : [...UNITS, unit]).map((u) => <option key={u} value={u}>{u || "unité"}</option>)}
+          {UNITS.map((u) => <option key={u} value={u}>{u || "unité"}</option>)}
         </select>
         <span className="muted small">par personne</span>
       </div>
-      <button className="btn btn-ghost btn-block" disabled={!name.trim()}>+ Ajouter l'ingrédient</button>
+      <div className="addrow">
+        <button type="button" className="btn btn-ghost small" onClick={() => setOpen(false)}>Annuler</button>
+        <button className="btn btn-primary small" disabled={!name.trim()}>Ajouter</button>
+      </div>
     </form>
   );
 }
@@ -107,14 +149,15 @@ function MealPicker({ state, selected, onToggle }: { state: WeekState; selected:
 }
 
 export default function Dishes({ state, mutate, me }: { state: WeekState; mutate: Mutate; me: string }) {
-  const known = useKnown(state);
   const [draft, setDraft] = useState<DraftIngredient[]>([]);
   const [targets, setTargets] = useState<Map<string, Target>>(new Map());
   const [busy, setBusy] = useState(false);
   const composerRef = useRef<HTMLElement>(null);
 
-  function addDraft(g: DraftIngredient) {
-    setDraft((d) => [...d.filter((x) => nameKey(x.name) !== nameKey(g.name)), g]);
+  function toggleDraft(o: Option) {
+    setDraft((d) => (d.some((x) => nameKey(x.name) === o.key)
+      ? d.filter((x) => nameKey(x.name) !== o.key)
+      : [...d, { name: o.name, qty_per_person: o.qty_per_person, unit: o.unit, source: o.source, category: o.category }]));
   }
   function toggleTarget(t: Target) {
     setTargets((m) => { const n = new Map(m); if (n.has(tkey(t))) n.delete(tkey(t)); else n.set(tkey(t), t); return n; });
@@ -143,9 +186,13 @@ export default function Dishes({ state, mutate, me }: { state: WeekState; mutate
     <div className="stack">
       <section className="panel composer" ref={composerRef}>
         <h2>Nouveau plat</h2>
-        <h3 className="subhead">1. Ingrédients, pour une personne</h3>
+        <h3 className="subhead">1. Cochez les ingrédients</h3>
+        <IngredientPicker state={state} selected={new Set(draft.map((g) => nameKey(g.name)))} onToggle={toggleDraft} />
+        <StapleAdder mutate={mutate} />
+
+        <h3 className="subhead">Quantités pour une personne</h3>
         {draft.length === 0 ? (
-          <p className="muted">Ajoutez les ingrédients un par un avec la quantité pour une personne (ex. lentilles : 200 g).</p>
+          <p className="muted">Les ingrédients cochés apparaissent ici : ajustez la quantité pour une personne (ex. lentilles : 200 g).</p>
         ) : (
           <ul className="inglist">
             {draft.map((g, i) => (
@@ -161,7 +208,6 @@ export default function Dishes({ state, mutate, me }: { state: WeekState; mutate
             ))}
           </ul>
         )}
-        <IngredientAdder known={known} onAdd={addDraft} exclude={new Set(draft.map((g) => nameKey(g.name)))} />
 
         <h3 className="subhead">2. Pour quels repas&nbsp;?</h3>
         <p className="muted">Touchez autant de repas que vous voulez, sur 3 semaines. Les quantités s'adaptent au nombre de personnes à chaque repas.</p>
@@ -194,7 +240,7 @@ export default function Dishes({ state, mutate, me }: { state: WeekState; mutate
 
       <h2 className="section-title">Plats de la semaine</h2>
       {dishes.length === 0 && <Empty>Aucun plat cette semaine. Composez-en un ci-dessus ou reprenez un plat déjà fait.</Empty>}
-      {dishes.map((d) => <DishCard key={d.id} dish={d} state={state} mutate={mutate} known={known} me={me} />)}
+      {dishes.map((d) => <DishCard key={d.id} dish={d} state={state} mutate={mutate} me={me} />)}
     </div>
   );
 }
@@ -243,11 +289,17 @@ export function IngredientLine({ state, dish, ing, me, mutate, editable }: {
   );
 }
 
-function DishCard({ dish, state, mutate, known, me }: { dish: Dish; state: WeekState; mutate: Mutate; known: Known; me: string }) {
+function DishCard({ dish, state, mutate, me }: { dish: Dish; state: WeekState; mutate: Mutate; me: string }) {
   const hc = headcount(state, dish.slot_id);
   const ings = state.ingredients.filter((i) => i.dish_id === dish.id);
   const [adding, setAdding] = useState(false);
-  const used = new Set(ings.map((i) => nameKey(state.items.find((x) => x.id === i.item_id)?.name ?? "")));
+  const keyOf = (i: DishIngredient) => nameKey(state.items.find((x) => x.id === i.item_id)?.name ?? "");
+  const used = new Set(ings.map(keyOf));
+  function toggle(o: Option) {
+    const ing = ings.find((i) => keyOf(i) === o.key);
+    if (ing) mutate("ing.delete", { id: ing.id });
+    else mutate("ing.set", { dish_id: dish.id, name: o.name, unit: o.unit, source: o.source, category: o.category, qty_per_person: o.qty_per_person });
+  }
 
   return (
     <article className="panel dish">
@@ -270,10 +322,12 @@ function DishCard({ dish, state, mutate, known, me }: { dish: Dish; state: WeekS
       )}
 
       {adding ? (
-        <IngredientAdder known={known} exclude={used}
-          onAdd={(g) => mutate("ing.set", { dish_id: dish.id, name: g.name, unit: g.unit, source: g.source, category: g.category, qty_per_person: g.qty_per_person })} />
+        <>
+          <IngredientPicker state={state} selected={used} onToggle={toggle} />
+          <button className="btn btn-ghost small" onClick={() => setAdding(false)}>Fermer</button>
+        </>
       ) : (
-        <button className="btn btn-ghost small" onClick={() => setAdding(true)}>+ Ajouter un ingrédient</button>
+        <button className="btn btn-ghost small" onClick={() => setAdding(true)}>+ Ajouter ou retirer des ingrédients</button>
       )}
 
       <button className="linkbtn danger" onClick={() => confirm("Supprimer ce plat ?") && mutate("dish.delete", { id: dish.id })}>Supprimer le plat</button>

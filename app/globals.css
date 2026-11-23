@@ -276,3 +276,10 @@ select.input {
 .chip-toggle { min-height: 36px; padding: 0 12px; border-radius: 999px; border: 2px solid var(--line); background: none; font-size: 0.85rem; font-weight: 700; color: var(--ink-2); }
 .chip-toggle.on { border-color: var(--tomato); background: var(--tomato); color: #fff; }
 .pdish .inglist li.ingrow { padding: 8px 0; border-top: 1px dotted var(--line); }
+
+/* ---------- Choix des ingrédients à cocher ---------- */
+.picker-groups { display: flex; flex-direction: column; gap: 12px; }
+.group-title { margin: 0 0 6px; font-size: 0.95rem; font-weight: 700; }
+.chip.pick { min-height: 42px; }
+.chip.pick.on { background: var(--ink); border-color: var(--ink); color: #fff; }
+.chip.pick.on span { color: #fff; }

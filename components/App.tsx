@@ -20,6 +20,7 @@ function normalize(d: Partial<WeekState> & { week: WeekState["week"] }): WeekSta
     library: d.library ?? [],
     exclusions: d.exclusions ?? [],
     plan: d.plan ?? [],
+    staples: d.staples ?? [],
   };
 }
 
