@@ -13,10 +13,11 @@ function normalize(d: Partial<WeekState> & { week: WeekState["week"] }): WeekSta
     week: d.week,
     slots: (d.slots ?? []).map((s) => ({ ...s, guests: s.guests ?? 0 })),
     attendance: d.attendance ?? [],
-    items: d.items ?? [],
+    items: (d.items ?? []).map((i) => ({ ...i, category: i.category ?? "autre" })),
     dishes: d.dishes ?? [],
     ingredients: d.ingredients ?? [],
     recents: d.recents ?? [],
+    library: d.library ?? [],
   };
 }
 

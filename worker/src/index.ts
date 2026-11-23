@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { isMonday, nameKey } from "../../lib/types";
+import { guessCategory, isCategory, isMonday, nameKey, type Category } from "../../lib/types";
 
 export interface Env {
   FAMILY: DurableObjectNamespace<Family>;
@@ -61,6 +61,7 @@ const now = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const bool = (v: SqlStorageValue) => v === 1;
+const catOf = (r: Row): Category => (isCategory(r.category) ? r.category : guessCategory(String(r.name)));
 
 async function sha256(s: string) {
   const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
@@ -107,9 +108,14 @@ export class Family extends DurableObject<Env> {
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
     // Migration : nombre d'invités par repas (la présence des membres est cochée par chacun)
-    if (!this.q("PRAGMA table_info(slots)").some((c) => c.name === "guests")) {
-      this.sql.exec("ALTER TABLE slots ADD COLUMN guests INTEGER NOT NULL DEFAULT 0");
-    }
+    this.addColumn("slots", "guests", "INTEGER NOT NULL DEFAULT 0");
+    // Migration : rayon des courses
+    this.addColumn("items", "category", "TEXT NOT NULL DEFAULT ''");
+    this.addColumn("ingredient_memory", "category", "TEXT NOT NULL DEFAULT ''");
+  }
+
+  addColumn(table: string, col: string, def: string) {
+    if (!this.q(`PRAGMA table_info(${table})`).some((c) => c.name === col)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
   }
 
   q(query: string, ...args: SqlStorageValue[]): Row[] {
@@ -344,37 +350,63 @@ export class Family extends DurableObject<Env> {
   state(weekStart: string) {
     const w = this.ensureWeek(weekStart);
     const wid = String(w.id);
-    const items = this.q("SELECT * FROM items WHERE week_id = ? ORDER BY created_at", wid).map((r) => ({ ...r, per_person: bool(r.per_person), checked: bool(r.checked) }));
+    const items = this.q("SELECT * FROM items WHERE week_id = ? ORDER BY created_at", wid).map((r) => ({ ...r, per_person: bool(r.per_person), checked: bool(r.checked), category: catOf(r) }));
     const dishes = this.q("SELECT * FROM dishes WHERE week_id = ? ORDER BY created_at", wid);
     const ingredients = this.q("SELECT di.* FROM dish_ingredients di JOIN dishes d ON d.id = di.dish_id WHERE d.week_id = ?", wid);
     const present = new Set(items.map((i) => nameKey(String((i as unknown as Row).name))));
     const recents = this.q("SELECT * FROM ingredient_memory ORDER BY last_week DESC, uses DESC LIMIT 120")
-      .filter((r) => !present.has(String(r.name_key))).slice(0, 40).map((r) => ({ ...r, per_person: bool(r.per_person) }));
+      .filter((r) => !present.has(String(r.name_key))).slice(0, 40).map((r) => ({ ...r, per_person: bool(r.per_person), category: catOf(r) }));
     return {
       week: { ...w, configured: bool(w.configured) },
       slots: this.q("SELECT * FROM slots WHERE week_id = ? ORDER BY day, meal DESC", wid).map((r) => ({ ...r, active: bool(r.active) })),
       attendance: this.q("SELECT a.slot_id, a.name_key, a.name FROM attendance a JOIN slots s ON s.id = a.slot_id WHERE s.week_id = ? ORDER BY a.name", wid),
       items, dishes, ingredients, recents,
+      library: this.library(),
     };
   }
 
-  remember(weekStart: string, it: { name: string; source: string; unit: string; quantity: number | null; per_person: boolean }) {
+  /** Plats déjà faits (toutes semaines), le plus récent par nom, avec leurs ingrédients par personne. */
+  library() {
+    const out: { name_key: string; name: string; ingredients: Row[] }[] = [];
+    const seen = new Set<string>();
+    for (const d of this.q("SELECT id, name FROM dishes ORDER BY created_at DESC LIMIT 400")) {
+      const key = nameKey(String(d.name));
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const ingredients = this.q(
+        `SELECT i.name, i.unit, i.source, i.category, di.qty_per_person FROM dish_ingredients di JOIN items i ON i.id = di.item_id
+         WHERE di.dish_id = ? ORDER BY i.name`, d.id,
+      ).map((r) => ({ ...r, category: catOf(r) }));
+      out.push({ name_key: key, name: String(d.name), ingredients });
+      if (out.length >= 60) break;
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name, "fr"));
+  }
+
+  remember(weekStart: string, it: { name: string; source: string; unit: string; quantity: number | null; per_person: boolean; category: string }) {
     this.sql.exec(
-      `INSERT INTO ingredient_memory (name_key, name, source, unit, quantity, per_person, last_week, uses) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+      `INSERT INTO ingredient_memory (name_key, name, source, unit, quantity, per_person, last_week, uses, category) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
        ON CONFLICT(name_key) DO UPDATE SET name = excluded.name, source = excluded.source, unit = excluded.unit, quantity = excluded.quantity,
-       per_person = excluded.per_person, last_week = excluded.last_week, uses = uses + 1`,
-      nameKey(it.name), it.name, it.source, it.unit, it.quantity, it.per_person ? 1 : 0, weekStart,
+       per_person = excluded.per_person, last_week = excluded.last_week, uses = uses + 1, category = excluded.category`,
+      nameKey(it.name), it.name, it.source, it.unit, it.quantity, it.per_person ? 1 : 0, weekStart, it.category,
     );
   }
 
   addItem(week: Row, b: Body): string {
     const name = str(b.name);
-    const dup = this.q("SELECT id, name FROM items WHERE week_id = ?", week.id).find((i) => nameKey(String(i.name)) === nameKey(name));
-    if (dup) return String(dup.id);
-    const it = { name, source: sourceOf(b.source), quantity: num(b.quantity), unit: unitOf(b.unit), per_person: b.per_person === true || b.per_person === 1 };
+    const dup = this.q("SELECT id, name, unit FROM items WHERE week_id = ?", week.id).find((i) => nameKey(String(i.name)) === nameKey(name));
+    if (dup) {
+      // Ingrédient déjà dans la liste : on complète seulement son unité si elle manquait
+      if (!dup.unit && unitOf(b.unit)) this.sql.exec("UPDATE items SET unit = ? WHERE id = ?", unitOf(b.unit), dup.id);
+      return String(dup.id);
+    }
+    const it = {
+      name, source: sourceOf(b.source), quantity: num(b.quantity), unit: unitOf(b.unit), per_person: b.per_person === true || b.per_person === 1,
+      category: isCategory(b.category) ? b.category : guessCategory(name),
+    };
     const id = uuid();
-    this.sql.exec("INSERT INTO items (id, week_id, name, source, quantity, unit, per_person, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      id, week.id, it.name, it.source, it.quantity, it.unit, it.per_person ? 1 : 0, now());
+    this.sql.exec("INSERT INTO items (id, week_id, name, source, quantity, unit, per_person, created_at, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      id, week.id, it.name, it.source, it.quantity, it.unit, it.per_person ? 1 : 0, now(), it.category);
     this.remember(String(week.week_start), it);
     return id;
   }
@@ -433,10 +465,11 @@ export class Family extends DurableObject<Env> {
         if (b.unit !== undefined) f.unit = unitOf(b.unit);
         if (typeof b.per_person === "boolean") f.per_person = b.per_person ? 1 : 0;
         if (typeof b.checked === "boolean") f.checked = b.checked ? 1 : 0;
+        if (isCategory(b.category)) f.category = b.category;
         this.patch("items", f, "id = ? AND week_id = ?", id, w);
         if ("name" in f || "unit" in f || "quantity" in f) {
           const it = this.one("SELECT * FROM items WHERE id = ?", id);
-          if (it) this.remember(String(week.week_start), { name: String(it.name), source: String(it.source), unit: String(it.unit), quantity: it.quantity as number | null, per_person: bool(it.per_person) });
+          if (it) this.remember(String(week.week_start), { name: String(it.name), source: String(it.source), unit: String(it.unit), quantity: it.quantity as number | null, per_person: bool(it.per_person), category: catOf(it) });
         }
         return;
       }
@@ -451,10 +484,26 @@ export class Family extends DurableObject<Env> {
       case "recent.add": {
         const r = this.one("SELECT * FROM ingredient_memory WHERE name_key = ?", str(b.name_key));
         if (!r) throw new Bad("Ingrédient oublié entre-temps");
-        return this.addItem(week, { ...r, per_person: bool(r.per_person) });
+        return this.addItem(week, { ...r, per_person: bool(r.per_person), category: catOf(r) });
       }
       case "recent.forget":
         return this.sql.exec("DELETE FROM ingredient_memory WHERE name_key = ?", str(b.name_key));
+      // Création d'un plat avec tous ses ingrédients (quantités par personne) en une fois
+      case "dish.create": {
+        const slot = b.slot_id ? this.slotOf(b.slot_id, w) : null;
+        const dishId = uuid();
+        this.sql.exec("INSERT INTO dishes (id, week_id, name, slot_id, created_at) VALUES (?, ?, ?, ?, ?)", dishId, w, str(b.name), slot, now());
+        const list = Array.isArray(b.ingredients) ? (b.ingredients as Body[]).slice(0, 40) : [];
+        for (const g of list) {
+          const itemId = this.addItem(week, { name: g.name, unit: g.unit, source: g.source, category: g.category });
+          this.sql.exec(
+            `INSERT INTO dish_ingredients (id, dish_id, item_id, qty_per_person) VALUES (?, ?, ?, ?)
+             ON CONFLICT(dish_id, item_id) DO UPDATE SET qty_per_person = excluded.qty_per_person`,
+            uuid(), dishId, itemId, num(g.qty_per_person) ?? 0,
+          );
+        }
+        return;
+      }
       case "dish.add": {
         const slot = b.slot_id ? idOf(b.slot_id) : null;
         if (slot && !this.one("SELECT id FROM slots WHERE id = ? AND week_id = ?", slot, w)) throw new Bad("Créneau introuvable");

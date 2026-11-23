@@ -170,6 +170,15 @@ select.input {
 .cell.me { border-style: solid; color: var(--ink); }
 .cell.me.on { background: var(--tomato); border-color: var(--tomato); color: #fff; }
 .cell.ghost { border: 0; }
+.small { font-size: 0.85rem; }
+.subhead { font-size: 1rem; margin-top: 4px; }
+.section-title { font-size: 1.35rem; margin-top: 8px; }
+.adder { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 2px dashed var(--line); border-radius: var(--radius-sm); }
+.library { list-style: none; margin: 0; padding: 0; }
+.library li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.library li:first-child { border-top: 0; }
+.library li > div { display: flex; flex-direction: column; min-width: 0; }
+.library li > div .small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn.small { min-height: 40px; padding: 0 14px; font-size: 0.95rem; }
 
 /* ---------- Courses ---------- */
@@ -179,7 +188,11 @@ select.input {
 .itemline { display: flex; align-items: center; gap: 4px; }
 .tick { width: var(--tap); height: var(--tap); display: grid; place-items: center; flex: none; cursor: pointer; }
 .tick input { width: 26px; height: 26px; accent-color: var(--ink); cursor: pointer; }
-.itemmain { flex: 1; min-height: var(--tap); border: 0; background: none; text-align: left; padding: 8px 0; display: flex; flex-direction: column; }
+.itemmain { flex: 1; min-width: 0; min-height: var(--tap); border: 0; background: none; text-align: left; padding: 8px 0; display: flex; flex-direction: column; }
+.itemqty { flex: none; font-size: 1.1rem; padding-left: 8px; white-space: nowrap; }
+.item.done .itemqty { color: var(--ink-2); font-weight: 400; }
+.aisle + .aisle { margin-top: 6px; }
+.aisle-title { font-size: 1rem; display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin: 0 -6px; background: var(--sage); border-radius: var(--radius-sm); }
 .itemname { font-size: 1.1rem; font-weight: 700; }
 .itemmeta { font-size: 0.92rem; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 0 8px; }
 .itemmeta b { color: var(--ink); }
