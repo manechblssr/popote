@@ -95,9 +95,14 @@ CREATE TABLE IF NOT EXISTS ingredient_memory (name_key TEXT PRIMARY KEY, name TE
 /* ------------------------------------------------------------------ */
 export class Family extends DurableObject<Env> {
   sql: SqlStorage;
+  // Valeurs nettoyées : un espace ou un retour à la ligne collé avec la valeur ferait échouer Telegram
+  admin: string;
+  botToken: string;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.admin = (env.TELEGRAM_ADMIN_CHAT_ID ?? "").trim();
+    this.botToken = (env.TELEGRAM_BOT_TOKEN ?? "").trim();
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
   }
@@ -178,16 +183,16 @@ export class Family extends DurableObject<Env> {
     if (existing) this.sql.exec("UPDATE devices SET name = ?, status = 'pending', created_at = ?, decided_at = NULL WHERE id = ?", name, now(), id);
     else this.sql.exec("INSERT INTO devices (id, name, token_hash, status, created_at) VALUES (?, ?, ?, 'pending', ?)", id, name, hash, now());
 
-    if (!this.env.TELEGRAM_ADMIN_CHAT_ID) throw new Bad("Le bot Telegram n'est pas encore configuré.", 503);
+    if (!this.admin) throw new Bad("Veuillez patienter.", 503);
     const sent = await this.tg("sendMessage", {
-      chat_id: this.env.TELEGRAM_ADMIN_CHAT_ID,
+      chat_id: this.admin,
       parse_mode: "HTML",
       text: `🍲 <b>${esc(name)}</b> demande l'accès à Popote depuis un nouvel appareil.`,
       reply_markup: { inline_keyboard: [[{ text: "✅ Accepter", callback_data: `ok:${id}` }, { text: "❌ Refuser", callback_data: `no:${id}` }]] },
     });
     // Échec d'envoi : on autorise un nouvel essai immédiat
     if (!sent.ok) this.sql.exec("UPDATE devices SET created_at = ? WHERE id = ?", new Date(0).toISOString(), id);
-    if (!sent.ok) throw new Bad("Le bot Telegram ne répond pas. Prévenez l'administrateur.", 502);
+    if (!sent.ok) throw new Bad("Veuillez patienter.", 502);
     return json({ id, status: "pending" });
   }
 
@@ -201,7 +206,7 @@ export class Family extends DurableObject<Env> {
 
   /* ---------------- Telegram ---------------- */
   async tg(method: string, body: Body): Promise<{ ok?: boolean; [k: string]: unknown }> {
-    const res = await fetch(`https://api.telegram.org/bot${this.env.TELEGRAM_BOT_TOKEN}/${method}`, {
+    const res = await fetch(`https://api.telegram.org/bot${this.botToken}/${method}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     const out = (await res.json().catch(() => ({}))) as { ok?: boolean };
@@ -211,7 +216,7 @@ export class Family extends DurableObject<Env> {
 
   /** Secret du webhook dérivé du token du bot : rien de plus à configurer. */
   webhookSecret() {
-    return hmac(this.env.TELEGRAM_BOT_TOKEN, "popote-webhook").then((h) => h.slice(0, 48));
+    return hmac(this.botToken,"popote-webhook").then((h) => h.slice(0, 48));
   }
 
   async setupWebhook(url: URL) {
@@ -226,7 +231,7 @@ export class Family extends DurableObject<Env> {
 
     const msg = update?.message;
     if (msg?.text && /^\/(start|id)\b/.test(msg.text)) {
-      const admin = this.env.TELEGRAM_ADMIN_CHAT_ID;
+      const admin = this.admin;
       await this.tg("sendMessage", {
         chat_id: msg.chat.id,
         text: admin ? `Bonjour ! Identifiant de cette conversation : ${msg.chat.id}` : `Identifiant de cette conversation : ${msg.chat.id}\nEnregistrez-le comme TELEGRAM_ADMIN_CHAT_ID pour recevoir les demandes d'accès.`,
@@ -236,7 +241,7 @@ export class Family extends DurableObject<Env> {
 
     const cb = update?.callback_query;
     if (!cb?.data) return json({ ok: true });
-    const admin = this.env.TELEGRAM_ADMIN_CHAT_ID ?? "";
+    const admin = this.admin;
     if (String(cb.message?.chat?.id) !== admin && String(cb.from?.id) !== admin) {
       await this.tg("answerCallbackQuery", { callback_query_id: cb.id, text: "Action réservée à l'administrateur." });
       return json({ ok: true });
