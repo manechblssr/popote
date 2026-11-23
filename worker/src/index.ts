@@ -187,8 +187,13 @@ export class Family extends DurableObject<Env> {
     const sent = await this.tg("sendMessage", {
       chat_id: this.admin,
       parse_mode: "HTML",
-      text: `🍲 <b>${esc(name)}</b> demande l'accès à Popote depuis un nouvel appareil.`,
-      reply_markup: { inline_keyboard: [[{ text: "✅ Accepter", callback_data: `ok:${id}` }, { text: "❌ Refuser", callback_data: `no:${id}` }]] },
+      text: `🍲 Nouvelle demande d'accès à Popote\n\n👤 Prénom : <b>${esc(name)}</b>\n📱 Depuis un nouvel appareil`,
+      reply_markup: {
+        inline_keyboard: [[
+          { text: `✅ Accepter ${name}`.slice(0, 60), callback_data: `ok:${id}` },
+          { text: `❌ Refuser ${name}`.slice(0, 60), callback_data: `no:${id}` },
+        ]],
+      },
     });
     // Échec d'envoi : on autorise un nouvel essai immédiat
     if (!sent.ok) this.sql.exec("UPDATE devices SET created_at = ? WHERE id = ?", new Date(0).toISOString(), id);
