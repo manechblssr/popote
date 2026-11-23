@@ -7,6 +7,19 @@ import Shopping from "./Shopping";
 import Dishes from "./Dishes";
 import Planning from "./Planning";
 
+/** Données reçues du serveur rendues sûres : une liste absente ne doit jamais faire planter l'écran. */
+function normalize(d: Partial<WeekState> & { week: WeekState["week"] }): WeekState {
+  return {
+    week: d.week,
+    slots: (d.slots ?? []).map((s) => ({ ...s, guests: s.guests ?? 0 })),
+    attendance: d.attendance ?? [],
+    items: d.items ?? [],
+    dishes: d.dishes ?? [],
+    ingredients: d.ingredients ?? [],
+    recents: d.recents ?? [],
+  };
+}
+
 export type Mutate = (op: string, payload?: Record<string, unknown>) => Promise<boolean>;
 type Tab = "semaine" | "courses" | "plats" | "planning";
 const TABS: { id: Tab; label: string; icon: string }[] = [
@@ -30,8 +43,8 @@ export default function App({ userName, onLogout }: { userName: string; onLogout
     if (status === 0) return setOnline(false);
     if (status === 401) return window.location.reload();
     setOnline(true);
-    if (!ok) return setError(data.error ?? "Chargement impossible.");
-    if (w === weekRef.current) setState(data);
+    if (!ok || !data.week) return setError(data.error ?? "Chargement impossible.");
+    if (w === weekRef.current) setState(normalize(data));
   }, []);
 
   useEffect(() => { setState(null); load(week); }, [week, load]);
@@ -58,7 +71,7 @@ export default function App({ userName, onLogout }: { userName: string; onLogout
     if (status === 401) { window.location.reload(); return false; }
     setOnline(true);
     if (!ok) { setError(data.error ?? "Modification impossible."); return false; }
-    if (data.week.week_start === weekRef.current) setState(data);
+    if (data.week?.week_start === weekRef.current) setState(normalize(data));
     return true;
   }, []);
 
