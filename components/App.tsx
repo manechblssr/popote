@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listen } from "@/lib/realtime";
+import { api, live } from "@/lib/api";
 import { addDays, dayLabel, mondayOf, type WeekState } from "@/lib/types";
 import Settings from "./Settings";
 import Shopping from "./Shopping";
@@ -16,7 +16,7 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "planning", label: "Planning", icon: "M5 5h14v15H5zM5 10h14M9 3v4M15 3v4" },
 ];
 
-export default function App({ userName }: { userName: string }) {
+export default function App({ userName, onLogout }: { userName: string; onLogout: () => void }) {
   const [week, setWeek] = useState(() => mondayOf());
   const [state, setState] = useState<WeekState | null>(null);
   const [tab, setTab] = useState<Tab | null>(null);
@@ -26,23 +26,25 @@ export default function App({ userName }: { userName: string }) {
   weekRef.current = week;
 
   const load = useCallback(async (w: string) => {
-    const r = await fetch(`/api/data?week=${w}`, { cache: "no-store" }).catch(() => null);
-    if (!r) { setOnline(false); return; }
-    if (r.status === 401) { window.location.reload(); return; }
-    const j = await r.json();
-    if (!r.ok) { setError(j.error); return; }
+    const { ok, status, data } = await api<WeekState>(`/api/data?week=${w}`);
+    if (status === 0) return setOnline(false);
+    if (status === 401) return window.location.reload();
     setOnline(true);
-    if (w === weekRef.current) setState(j);
+    if (!ok) return setError(data.error ?? "Chargement impossible.");
+    if (w === weekRef.current) setState(data);
   }, []);
 
   useEffect(() => { setState(null); load(week); }, [week, load]);
 
+  // Temps réel : chaque modification d'un membre déclenche un rechargement chez les autres
   useEffect(() => {
-    const off = listen("popote-family", "change", (p) => { if (p.week === weekRef.current) load(weekRef.current); });
+    const close = live(
+      (m) => { if (m.type === "change" && m.week === weekRef.current) load(weekRef.current); },
+      () => load(weekRef.current), // à chaque (re)connexion, on rattrape ce qui a pu être manqué
+    );
     const refresh = () => { if (document.visibilityState === "visible") load(weekRef.current); };
     document.addEventListener("visibilitychange", refresh);
-    window.addEventListener("online", refresh);
-    return () => { off(); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("online", refresh); };
+    return () => { close(); document.removeEventListener("visibilitychange", refresh); };
   }, [load]);
 
   useEffect(() => {
@@ -51,22 +53,17 @@ export default function App({ userName }: { userName: string }) {
 
   const mutate: Mutate = useCallback(async (op, payload = {}) => {
     setError("");
-    const r = await fetch("/api/data", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ week: weekRef.current, op, ...payload }),
-    }).catch(() => null);
-    if (!r) { setOnline(false); setError("Pas de connexion : modification non enregistrée."); return false; }
-    if (r.status === 401) { window.location.reload(); return false; }
-    const j = await r.json();
-    if (!r.ok) { setError(j.error ?? "Modification impossible."); return false; }
+    const { ok, status, data } = await api<WeekState>("/api/data", { method: "POST", body: { week: weekRef.current, op, ...payload } });
+    if (status === 0) { setOnline(false); setError("Pas de connexion : modification non enregistrée."); return false; }
+    if (status === 401) { window.location.reload(); return false; }
     setOnline(true);
-    if (j.week.week_start === weekRef.current) setState(j);
+    if (!ok) { setError(data.error ?? "Modification impossible."); return false; }
+    if (data.week.week_start === weekRef.current) setState(data);
     return true;
   }, []);
 
-  async function logout() {
-    if (!confirm("Se déconnecter de cet appareil ?")) return;
-    await fetch("/api/auth/status", { method: "DELETE" });
-    window.location.reload();
+  function logout() {
+    if (confirm("Se déconnecter de cet appareil ?")) onLogout();
   }
 
   const current = mondayOf();

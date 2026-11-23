@@ -1,0 +1,17 @@
+name = "popote-api"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+
+[vars]
+# Origines autorisées à appeler l'API (séparées par des virgules)
+ALLOWED_ORIGINS = "https://manechblssr.github.io,http://localhost:3000"
+
+[[durable_objects.bindings]]
+name = "FAMILY"
+class_name = "Family"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Family"]
+
+# Secrets (wrangler secret put …) : TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID

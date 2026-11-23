@@ -53,7 +53,7 @@ export function fmtQty(q: number): string {
   return r.toLocaleString("fr-FR");
 }
 export function fmtAmount(q: number | null, unit: string): string {
-  if (q == null || q === 0) return unit ? unit : "";
+  if (q == null || q === 0) return "";
   return unit ? `${fmtQty(q)} ${unit}` : fmtQty(q);
 }
 export const nameKey = (s: string) => s.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ");
