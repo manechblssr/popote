@@ -13,10 +13,15 @@ export interface DishIngredient { id: string; dish_id: string; item_id: string; 
 export interface Recent { name_key: string; name: string; source: Source; unit: string; quantity: number | null; per_person: boolean; last_week: string; uses: number; category: Category }
 /** Ingrédient d'un plat à composer ou d'un plat déjà fait (quantité par personne). */
 export interface DraftIngredient { name: string; qty_per_person: number; unit: string; source: Source; category: Category }
+/** Quelqu'un qui mange au repas mais pas cet ingrédient du plat. */
+export interface Exclusion { ingredient_id: string; name_key: string; name: string }
+/** Repas d'une des 3 semaines planifiables (avec les plats déjà placés). */
+export interface PlanSlot { id: string; day: number; meal: Meal; active: boolean; taken: string[] }
+export interface PlanWeek { week_start: string; slots: PlanSlot[] }
 export interface LibraryDish { name_key: string; name: string; ingredients: DraftIngredient[] }
 
 export interface WeekState {
-  week: Week; slots: Slot[]; attendance: Attendance[]; items: Item[]; dishes: Dish[]; ingredients: DishIngredient[]; recents: Recent[]; library: LibraryDish[];
+  week: Week; slots: Slot[]; attendance: Attendance[]; items: Item[]; dishes: Dish[]; ingredients: DishIngredient[]; recents: Recent[]; library: LibraryDish[]; exclusions: Exclusion[]; plan: PlanWeek[];
 }
 
 /* ---------- Rayons des courses ---------- */

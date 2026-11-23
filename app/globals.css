@@ -262,3 +262,17 @@ select.input {
 @media (min-width: 720px) {
   .content { padding-top: 24px; }
 }
+
+/* ---------- Plats : 3 semaines, lignes d'ingrédients ---------- */
+.picker3 { display: flex; flex-direction: column; gap: 10px; }
+.picker3 .segmented button { padding: 0 10px; font-size: 0.85rem; }
+.cell .taken { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.72rem; opacity: 0.8; }
+.inglist li.ingrow { display: flex; flex-direction: column; gap: 6px; align-items: stretch; grid-template-columns: none; }
+.ingrow-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.ingrow-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ingrow-end { display: inline-flex; align-items: center; gap: 2px; }
+.ingrow-top { align-items: center; }
+.sauf { font-size: 0.9rem; font-weight: 700; color: var(--tomato); }
+.chip-toggle { min-height: 36px; padding: 0 12px; border-radius: 999px; border: 2px solid var(--line); background: none; font-size: 0.85rem; font-weight: 700; color: var(--ink-2); }
+.chip-toggle.on { border-color: var(--tomato); background: var(--tomato); color: #fff; }
+.pdish .inglist li.ingrow { padding: 8px 0; border-top: 1px dotted var(--line); }

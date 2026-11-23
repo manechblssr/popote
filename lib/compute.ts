@@ -19,6 +19,27 @@ export function headcount(state: WeekState, slotId: string | null): Headcount {
 
 export const dishPeople = (state: WeekState, dish: Dish) => headcount(state, dish.slot_id).count;
 
+/** Un plat n'a pas de nom : on l'affiche par ses ingrédients. */
+export function dishTitle(state: WeekState, dish: Dish): string {
+  const names = state.ingredients.filter((i) => i.dish_id === dish.id)
+    .map((i) => state.items.find((x) => x.id === i.item_id)?.name).filter(Boolean);
+  return names.length ? names.join(", ") : "Plat sans ingrédient";
+}
+
+/** Qui a signalé ne pas manger cet ingrédient (parmi les convives du repas). */
+export function excludedFor(state: WeekState, dish: Dish, ingredientId: string): string[] {
+  const h = headcount(state, dish.slot_id);
+  const eaters = new Set(state.attendance.filter((a) => a.slot_id === dish.slot_id).map((a) => a.name_key));
+  return state.exclusions
+    .filter((e) => e.ingredient_id === ingredientId && (h.estimated || eaters.has(e.name_key)))
+    .map((e) => e.name);
+}
+
+/** Nombre de personnes qui mangent réellement cet ingrédient. */
+export function ingredientPeople(state: WeekState, dish: Dish, ingredientId: string): number {
+  return Math.max(0, dishPeople(state, dish) - excludedFor(state, dish, ingredientId).length);
+}
+
 /** Texte « Mangent ici : Manech, Calista + 1 invité ». */
 export function eatersLabel(h: Headcount): string {
   if (h.names.length === 0 && h.guests === 0) return "Personne n'a encore coché";
@@ -34,7 +55,7 @@ export function neededByItem(state: WeekState): Map<string, number> {
     if (!dish) continue;
     const slot = state.slots.find((s) => s.id === dish.slot_id);
     if (slot && !slot.active) continue;
-    out.set(ing.item_id, (out.get(ing.item_id) ?? 0) + ing.qty_per_person * dishPeople(state, dish));
+    out.set(ing.item_id, (out.get(ing.item_id) ?? 0) + ing.qty_per_person * ingredientPeople(state, dish, ing.id));
   }
   return out;
 }

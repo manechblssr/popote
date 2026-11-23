@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { guessCategory, isCategory, isMonday, nameKey, type Category } from "../../lib/types";
+import { addDays as addDaysIso, guessCategory, isCategory, isMonday, nameKey, type Category } from "../../lib/types";
 
 export interface Env {
   FAMILY: DurableObjectNamespace<Family>;
@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, tok
 CREATE TABLE IF NOT EXISTS weeks (id TEXT PRIMARY KEY, week_start TEXT NOT NULL UNIQUE, default_people INTEGER NOT NULL DEFAULT 4, configured INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS slots (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, day INTEGER NOT NULL, meal TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, people INTEGER, UNIQUE (week_id, day, meal));
 CREATE TABLE IF NOT EXISTS attendance (slot_id TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (slot_id, name_key));
+CREATE TABLE IF NOT EXISTS exclusions (ingredient_id TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (ingredient_id, name_key));
 CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, quantity REAL, unit TEXT NOT NULL DEFAULT '', per_person INTEGER NOT NULL DEFAULT 0, checked INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS items_week ON items(week_id);
 CREATE TABLE IF NOT EXISTS dishes (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, name TEXT NOT NULL, slot_id TEXT, created_at TEXT NOT NULL);
@@ -97,6 +98,7 @@ CREATE TABLE IF NOT EXISTS ingredient_memory (name_key TEXT PRIMARY KEY, name TE
 /* ------------------------------------------------------------------ */
 export class Family extends DurableObject<Env> {
   sql: SqlStorage;
+  touchedWeeks: string[] = [];
   // Valeurs nettoyées : un espace ou un retour à la ligne collé avec la valeur ferait échouer Telegram
   admin: string;
   botToken: string;
@@ -142,6 +144,8 @@ export class Family extends DurableObject<Env> {
           const week = this.weekParam(b.week);
           this.ctx.storage.transactionSync(() => this.apply(this.ensureWeek(week), b, String(dev.name)));
           this.notifyFamily(week);
+          for (const other of this.touchedWeeks) if (other !== week) this.notifyFamily(other);
+          this.touchedWeeks = [];
           return json(this.state(week));
         }
         case "POST /telegram/webhook": return await this.telegram(req);
@@ -361,23 +365,48 @@ export class Family extends DurableObject<Env> {
       slots: this.q("SELECT * FROM slots WHERE week_id = ? ORDER BY day, meal DESC", wid).map((r) => ({ ...r, active: bool(r.active) })),
       attendance: this.q("SELECT a.slot_id, a.name_key, a.name FROM attendance a JOIN slots s ON s.id = a.slot_id WHERE s.week_id = ? ORDER BY a.name", wid),
       items, dishes, ingredients, recents,
+      exclusions: this.q(
+        `SELECT e.ingredient_id, e.name_key, e.name FROM exclusions e JOIN dish_ingredients di ON di.id = e.ingredient_id
+         JOIN dishes d ON d.id = di.dish_id WHERE d.week_id = ? ORDER BY e.name`, wid),
+      plan: [0, 7, 14].map((n) => this.planWeek(addDaysIso(weekStart, n))),
       library: this.library(),
     };
+  }
+
+  /** Repas d'une semaine (et plats déjà placés) pour le choix multi-repas sur 3 semaines. */
+  planWeek(weekStart: string) {
+    const w = this.ensureWeek(weekStart);
+    const slots = this.q("SELECT id, day, meal, active FROM slots WHERE week_id = ? ORDER BY day, meal DESC", w.id);
+    const dishes = this.q("SELECT id, slot_id FROM dishes WHERE week_id = ? AND slot_id IS NOT NULL", w.id);
+    return {
+      week_start: weekStart,
+      slots: slots.map((s) => ({
+        id: s.id, day: s.day, meal: s.meal, active: bool(s.active),
+        taken: dishes.filter((d) => d.slot_id === s.id).map((d) => this.dishLabel(String(d.id))),
+      })),
+    };
+  }
+
+  /** Un plat n'a pas de nom : on l'affiche par ses ingrédients. */
+  dishLabel(dishId: string) {
+    const names = this.q("SELECT i.name FROM dish_ingredients di JOIN items i ON i.id = di.item_id WHERE di.dish_id = ? ORDER BY di.rowid", dishId).map((r) => String(r.name));
+    return names.length ? names.join(", ") : "Plat sans ingrédient";
   }
 
   /** Plats déjà faits (toutes semaines), le plus récent par nom, avec leurs ingrédients par personne. */
   library() {
     const out: { name_key: string; name: string; ingredients: Row[] }[] = [];
     const seen = new Set<string>();
-    for (const d of this.q("SELECT id, name FROM dishes ORDER BY created_at DESC LIMIT 400")) {
-      const key = nameKey(String(d.name));
-      if (seen.has(key)) continue;
-      seen.add(key);
+    for (const d of this.q("SELECT id FROM dishes ORDER BY created_at DESC LIMIT 400")) {
       const ingredients = this.q(
         `SELECT i.name, i.unit, i.source, i.category, di.qty_per_person FROM dish_ingredients di JOIN items i ON i.id = di.item_id
-         WHERE di.dish_id = ? ORDER BY i.name`, d.id,
-      ).map((r) => ({ ...r, category: catOf(r) }));
-      out.push({ name_key: key, name: String(d.name), ingredients });
+         WHERE di.dish_id = ? ORDER BY di.rowid`, d.id,
+      ).map((r) => ({ ...r, name: String(r.name), category: catOf(r) }));
+      if (!ingredients.length) continue;
+      const key = ingredients.map((g) => nameKey(String(g.name))).sort().join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ name_key: key, name: ingredients.map((g) => String(g.name)).join(", "), ingredients });
       if (out.length >= 60) break;
     }
     return out.sort((a, b) => a.name.localeCompare(b.name, "fr"));
@@ -476,6 +505,7 @@ export class Family extends DurableObject<Env> {
       case "item.delete": {
         const id = idOf(b.id);
         if (!this.one("SELECT id FROM items WHERE id = ? AND week_id = ?", id, w)) return;
+        this.sql.exec("DELETE FROM exclusions WHERE ingredient_id IN (SELECT id FROM dish_ingredients WHERE item_id = ?)", id);
         this.sql.exec("DELETE FROM dish_ingredients WHERE item_id = ?", id);
         return this.sql.exec("DELETE FROM items WHERE id = ?", id);
       }
@@ -490,18 +520,41 @@ export class Family extends DurableObject<Env> {
         return this.sql.exec("DELETE FROM ingredient_memory WHERE name_key = ?", str(b.name_key));
       // Création d'un plat avec tous ses ingrédients (quantités par personne) en une fois
       case "dish.create": {
-        const slot = b.slot_id ? this.slotOf(b.slot_id, w) : null;
-        const dishId = uuid();
-        this.sql.exec("INSERT INTO dishes (id, week_id, name, slot_id, created_at) VALUES (?, ?, ?, ?, ?)", dishId, w, str(b.name), slot, now());
         const list = Array.isArray(b.ingredients) ? (b.ingredients as Body[]).slice(0, 40) : [];
-        for (const g of list) {
-          const itemId = this.addItem(week, { name: g.name, unit: g.unit, source: g.source, category: g.category });
-          this.sql.exec(
-            `INSERT INTO dish_ingredients (id, dish_id, item_id, qty_per_person) VALUES (?, ?, ?, ?)
-             ON CONFLICT(dish_id, item_id) DO UPDATE SET qty_per_person = excluded.qty_per_person`,
-            uuid(), dishId, itemId, num(g.qty_per_person) ?? 0,
-          );
+        if (!list.length) throw new Bad("Ajoutez au moins un ingrédient");
+        const label = list.map((g) => str(g.name)).join(", ").slice(0, 80);
+        // Repas choisis, sur cette semaine ou les 2 suivantes ; aucun = plat pas encore placé
+        const targets = Array.isArray(b.targets) ? (b.targets as Body[]).slice(0, 42) : [];
+        const allowed = [0, 7, 14].map((n) => addDaysIso(String(week.week_start), n));
+        const places: { wk: Row; slot: string | null }[] = targets.length ? targets.map((t) => {
+          const ws = this.weekParam(t.week);
+          if (!allowed.includes(ws)) throw new Bad("Semaine hors des 3 semaines");
+          const wk = this.ensureWeek(ws);
+          const s = this.one("SELECT id FROM slots WHERE week_id = ? AND day = ? AND meal = ?", wk.id, Number(t.day), t.meal === "lunch" ? "lunch" : "dinner");
+          if (!s) throw new Bad("Repas introuvable");
+          return { wk, slot: String(s.id) };
+        }) : [{ wk: week, slot: null }];
+        for (const { wk, slot } of places) {
+          const dishId = uuid();
+          this.sql.exec("INSERT INTO dishes (id, week_id, name, slot_id, created_at) VALUES (?, ?, ?, ?, ?)", dishId, wk.id, label, slot, now());
+          for (const g of list) {
+            const itemId = this.addItem(wk, { name: g.name, unit: g.unit, source: g.source, category: g.category });
+            this.sql.exec(
+              `INSERT INTO dish_ingredients (id, dish_id, item_id, qty_per_person) VALUES (?, ?, ?, ?)
+               ON CONFLICT(dish_id, item_id) DO UPDATE SET qty_per_person = excluded.qty_per_person`,
+              uuid(), dishId, itemId, num(g.qty_per_person) ?? 0,
+            );
+          }
+          this.touchedWeeks.push(String(wk.week_start));
         }
+        return;
+      }
+      // « Je mange à ce repas mais pas cet ingrédient » : chacun pour soi
+      case "ing.exclude": {
+        const ing = this.one("SELECT di.id FROM dish_ingredients di JOIN dishes d ON d.id = di.dish_id WHERE di.id = ? AND d.week_id = ?", idOf(b.id), w);
+        if (!ing) throw new Bad("Ingrédient introuvable");
+        if (b.excluded === true) this.sql.exec("INSERT OR IGNORE INTO exclusions (ingredient_id, name_key, name) VALUES (?, ?, ?)", ing.id, nameKey(me), me);
+        else this.sql.exec("DELETE FROM exclusions WHERE ingredient_id = ? AND name_key = ?", ing.id, nameKey(me));
         return;
       }
       case "dish.add": {
@@ -522,6 +575,7 @@ export class Family extends DurableObject<Env> {
       case "dish.delete": {
         const id = idOf(b.id);
         if (!this.one("SELECT id FROM dishes WHERE id = ? AND week_id = ?", id, w)) return;
+        this.sql.exec("DELETE FROM exclusions WHERE ingredient_id IN (SELECT id FROM dish_ingredients WHERE dish_id = ?)", id);
         this.sql.exec("DELETE FROM dish_ingredients WHERE dish_id = ?", id);
         return this.sql.exec("DELETE FROM dishes WHERE id = ?", id);
       }
@@ -545,6 +599,7 @@ export class Family extends DurableObject<Env> {
       case "ing.delete": {
         const ing = this.one("SELECT di.id FROM dish_ingredients di JOIN dishes d ON d.id = di.dish_id WHERE di.id = ? AND d.week_id = ?", idOf(b.id), w);
         if (!ing) throw new Bad("Ingrédient introuvable");
+        this.sql.exec("DELETE FROM exclusions WHERE ingredient_id = ?", ing.id);
         return this.sql.exec("DELETE FROM dish_ingredients WHERE id = ?", ing.id);
       }
       default:

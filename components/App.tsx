@@ -18,6 +18,8 @@ function normalize(d: Partial<WeekState> & { week: WeekState["week"] }): WeekSta
     ingredients: d.ingredients ?? [],
     recents: d.recents ?? [],
     library: d.library ?? [],
+    exclusions: d.exclusions ?? [],
+    plan: d.plan ?? [],
   };
 }
 
@@ -104,7 +106,7 @@ export default function App({ userName, onLogout }: { userName: string; onLogout
         ) : tab === "courses" ? (
           <Shopping state={state} mutate={mutate} />
         ) : tab === "plats" ? (
-          <Dishes state={state} mutate={mutate} />
+          <Dishes state={state} mutate={mutate} me={userName} />
         ) : (
           <Planning state={state} mutate={mutate} me={userName} />
         )}

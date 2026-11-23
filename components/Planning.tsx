@@ -1,11 +1,12 @@
 "use client";
-import { eatersLabel, headcount } from "@/lib/compute";
-import { DAYS, MEALS, dayLabel, fmtAmount, nameKey, type WeekState } from "@/lib/types";
+import { dishTitle, eatersLabel, headcount } from "@/lib/compute";
+import { IngredientLine } from "./Dishes";
+import { DAYS, MEALS, dayLabel, nameKey, type WeekState } from "@/lib/types";
 import type { Mutate } from "./App";
 import { Empty, Stepper } from "./ui";
 
 export default function Planning({ state, mutate, me }: { state: WeekState; mutate: Mutate; me: string }) {
-  const { week, slots, dishes, ingredients, items, attendance } = state;
+  const { week, slots, dishes, ingredients, attendance } = state;
   const active = slots.filter((s) => s.active);
   if (active.length === 0) return <Empty>Aucun repas prévu cette semaine. Choisissez les créneaux dans l'onglet Semaine.</Empty>;
   const myKey = nameKey(me);
@@ -46,18 +47,11 @@ export default function Planning({ state, mutate, me }: { state: WeekState; muta
                     <p className="muted">Aucun plat prévu.</p>
                   ) : planned.map((dish) => (
                     <div key={dish.id} className="pdish">
-                      <h3>{dish.name}</h3>
-                      <ul>
-                        {ingredients.filter((i) => i.dish_id === dish.id).map((ing) => {
-                          const item = items.find((i) => i.id === ing.item_id);
-                          if (!item) return null;
-                          return (
-                            <li key={ing.id}>
-                              <span>{item.name}</span>
-                              <b>{ing.qty_per_person ? fmtAmount(ing.qty_per_person * h.count, item.unit) : "à doser"}</b>
-                            </li>
-                          );
-                        })}
+                      <h3>{dishTitle(state, dish)}</h3>
+                      <ul className="inglist">
+                        {ingredients.filter((i) => i.dish_id === dish.id).map((ing) => (
+                          <IngredientLine key={ing.id} state={state} dish={dish} ing={ing} me={me} mutate={mutate} editable={false} />
+                        ))}
                       </ul>
                     </div>
                   ))}
