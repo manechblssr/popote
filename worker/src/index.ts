@@ -416,7 +416,7 @@ export class Family extends DurableObject<Env> {
     return {
       me: mine ? { phone: phone.slice(0, 4) + " •• •• " + phone.slice(-2), weekly: bool(mine.weekly) } : null,
       members: this.q("SELECT name FROM whatsapp ORDER BY name").map((r) => String(r.name)),
-      bot: this.env.WA_TOKEN && this.env.WA_PHONE_ID ? (this.env.WA_NUMBER ?? "") : null,
+      bot: this.env.WA_TOKEN && this.env.WA_PHONE_ID ? (this.env.WA_NUMBER ?? "").trim() : null,
     };
   }
 
@@ -464,7 +464,7 @@ export class Family extends DurableObject<Env> {
     if (!this.env.WA_TOKEN || !this.env.WA_PHONE_ID) return { ok: false, code: -1 };
     const base = this.env.WA_API_URL ?? "https://graph.facebook.com/v22.0";
     try {
-      const res = await fetch(`${base}/${this.env.WA_PHONE_ID}/messages`, {
+      const res = await fetch(`${base}/${this.env.WA_PHONE_ID.trim()}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.env.WA_TOKEN.trim()}` },
         body: JSON.stringify({ messaging_product: "whatsapp", ...body }),
@@ -492,7 +492,7 @@ export class Family extends DurableObject<Env> {
       const res = await this.waText(String(r.phone), text);
       if (res.ok) { sent.push(String(r.name)); continue; }
       if (res.code === 131047 && this.env.WA_TEMPLATE) {
-        const t = await this.waApi({ to: String(r.phone).replace(/^\+/, ""), type: "template", template: { name: this.env.WA_TEMPLATE, language: { code: "fr" } } });
+        const t = await this.waApi({ to: String(r.phone).replace(/^\+/, ""), type: "template", template: { name: this.env.WA_TEMPLATE.trim(), language: { code: "fr" } } });
         (t.ok ? sent : failed).push(String(r.name));
       } else (res.code === 131047 ? expired : failed).push(String(r.name));
     }
@@ -527,7 +527,7 @@ export class Family extends DurableObject<Env> {
 
   /** Vérification du webhook par Meta (une fois, lors de la configuration). */
   waVerify(url: URL) {
-    const token = this.env.WA_VERIFY_TOKEN ?? "";
+    const token = (this.env.WA_VERIFY_TOKEN ?? "").trim();
     if (url.searchParams.get("hub.mode") === "subscribe" && token && safeEqual(url.searchParams.get("hub.verify_token") ?? "", token)) {
       return new Response(url.searchParams.get("hub.challenge") ?? "", { status: 200 });
     }
