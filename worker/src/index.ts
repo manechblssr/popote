@@ -429,8 +429,6 @@ export class Family extends DurableObject<Env> {
       const list = courses.filter((i) => i.category === cat.id).sort((a, b) => a.name.localeCompare(b.name, "fr"));
       if (list.length) out.push("", `${cat.icon} *${cat.label}*`, ...list.map(line));
     }
-    const placard = st.items.filter((i) => i.source === "placard" && needed.get(i.id));
-    if (placard.length) out.push("", "🏠 *À vérifier au placard*", ...placard.map(line));
 
     out.push("", "🍽️ *REPAS DE LA SEMAINE*");
     let any = false;
