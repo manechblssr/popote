@@ -6,6 +6,10 @@ compatibility_date = "2026-11-01"
 # Origines autorisées à appeler l'API (séparées par des virgules)
 ALLOWED_ORIGINS = "https://manechblssr.github.io,http://localhost:3000"
 
+# Jeudi 17 h et 18 h UTC = 19 h à Paris en été ou en hiver (le code ne garde que 19 h, heure de Paris)
+[triggers]
+crons = ["0 17,18 * * 4"]
+
 [[durable_objects.bindings]]
 name = "FAMILY"
 class_name = "Family"

@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "paths": { "@/*": ["../*"] }
   },
-  "include": ["src/**/*.ts", "../lib/types.ts"]
+  "include": ["src/**/*.ts", "../lib/types.ts", "../lib/compute.ts"]
 }

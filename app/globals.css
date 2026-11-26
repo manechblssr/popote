@@ -283,3 +283,10 @@ select.input {
 .chip.pick { min-height: 42px; }
 .chip.pick.on { background: var(--ink); border-color: var(--ink); color: #fff; }
 .chip.pick.on span { color: #fff; }
+
+/* ---------- WhatsApp ---------- */
+.steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 0.95rem; }
+.steps a { color: var(--ink); font-weight: 700; }
+.notice { background: var(--sage); border-radius: var(--radius-sm); padding: 8px 12px; font-weight: 700; font-size: 0.95rem; }
+.check.wrap { white-space: normal; align-items: flex-start; line-height: 1.35; padding: 6px 0; }
+.check.wrap input { flex: none; margin-top: 1px; }
