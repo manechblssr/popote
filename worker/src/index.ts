@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import {
-  CATEGORIES, DEFAULT_STAPLES, MEALS, addDays as addDaysIso, dayLabel, dayName, fmtAmount, guessCategory, isCategory, isTheme, isWeekStart, nameKey, weekdayOf,
+  CATEGORIES, DEFAULT_STAPLES, MEALS, addDays as addDaysIso, dayLabel, dayName, fmtAmount, guessCategory, isCategory, isTheme, isWeekStart, nameKey, weekStartOf, weekdayOf,
   type Category, type WeekState,
 } from "../../lib/types";
 import { dishTitle, eatersLabel, excludedFor, headcount, ingredientPeople, neededByItem } from "../../lib/compute";
@@ -285,6 +285,19 @@ export class Family extends DurableObject<Env> {
         chat_id: msg.chat.id,
         text: admin ? `Bonjour ! Identifiant de cette conversation : ${msg.chat.id}` : `Identifiant de cette conversation : ${msg.chat.id}\nEnregistrez-le comme TELEGRAM_ADMIN_CHAT_ID pour recevoir les demandes d'accès.`,
       });
+      return json({ ok: true });
+    }
+
+    // « /recap » : récap de la semaine en cours à la demande (administrateur ou conversation du planning)
+    if (msg?.text && /^\/recap\b/.test(msg.text)) {
+      const plan = (this.env.TELEGRAM_PLAN_CHAT_ID ?? "").trim();
+      const allowed = [this.admin, plan].filter(Boolean);
+      if (allowed.includes(String(msg.chat?.id)) || allowed.includes(String(msg.from?.id))) {
+        const week = weekStartOf(new Date(Date.now() + 3600_000)); // ≈ heure de Paris
+        for (const text of Family.chunks(`🔔 <b>Récap de la semaine</b>\n\n${this.weekReport(week)}`)) {
+          await this.tg("sendMessage", { chat_id: msg.chat.id, parse_mode: "HTML", text });
+        }
+      }
       return json({ ok: true });
     }
 
