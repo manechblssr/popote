@@ -6,9 +6,9 @@ compatibility_date = "2026-11-01"
 # Origines autorisées à appeler l'API (séparées par des virgules)
 ALLOWED_ORIGINS = "https://manechblssr.github.io,http://localhost:3000"
 
-# Aucune tâche planifiée : l'envoi Telegram se fait avec le bouton « Valider »
+# Vendredi 14 h et 15 h UTC = 16 h à Paris en été ou en hiver (le code ne garde que 16 h, heure de Paris) : récap Telegram
 [triggers]
-crons = []
+crons = ["0 14,15 * * 5"]
 
 [[durable_objects.bindings]]
 name = "FAMILY"

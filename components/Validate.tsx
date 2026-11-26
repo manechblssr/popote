@@ -27,6 +27,7 @@ export default function Validate({ state }: { state: WeekState }) {
       <p className="muted">
         Envoie sur Telegram les courses à faire et le menu de cette semaine et des 2 suivantes, chaque semaine séparément.
       </p>
+      <p className="muted small">Et chaque vendredi à 16 h, le récap de la semaine (courses, portions et nombre de personnes) arrive tout seul.</p>
       <p className="small"><b>{filled}</b> repas sur <b>{meals.length}</b> ont un plat sur les 3 semaines.</p>
       {v && (
         <p className="muted small">

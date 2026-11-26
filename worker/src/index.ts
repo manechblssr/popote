@@ -3,7 +3,7 @@ import {
   CATEGORIES, DEFAULT_STAPLES, MEALS, addDays as addDaysIso, dayLabel, dayName, fmtAmount, guessCategory, isCategory, isTheme, isWeekStart, nameKey, weekdayOf,
   type Category, type WeekState,
 } from "../../lib/types";
-import { dishTitle, eatersLabel, headcount, neededByItem } from "../../lib/compute";
+import { dishTitle, eatersLabel, excludedFor, headcount, ingredientPeople, neededByItem } from "../../lib/compute";
 
 export interface Env {
   FAMILY: DurableObjectNamespace<Family>;
@@ -11,6 +11,7 @@ export interface Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_ADMIN_CHAT_ID?: string;
   TELEGRAM_API_URL?: string; // pour les tests locaux uniquement
+  TEST_NOW?: string;         // date simulée, pour les tests locaux uniquement
   TELEGRAM_PLAN_CHAT_ID?: string; // conversation (ou groupe) qui reçoit le planning validé ; par défaut celle de l'administrateur
 }
 
@@ -25,6 +26,7 @@ export default {
       ? { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Max-Age": "86400", Vary: "Origin" }
       : {};
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+    if (new URL(req.url).pathname.startsWith("/internal/")) return new Response("Introuvable", { status: 404 });
 
     const stub = env.FAMILY.get(env.FAMILY.idFromName("family"));
     const res = await stub.fetch(req);
@@ -32,6 +34,12 @@ export default {
     const out = new Response(res.body, res);
     for (const [k, v] of Object.entries(cors)) out.headers.set(k, v);
     return out;
+  },
+
+  // Déclenché le vendredi à 14 h et 15 h UTC : le Durable Object n'envoie qu'à 16 h, heure de Paris (été comme hiver)
+  async scheduled(_event: ScheduledController, env: Env) {
+    const stub = env.FAMILY.get(env.FAMILY.idFromName("family"));
+    await stub.fetch("https://popote.internal/internal/friday", { method: "POST" });
   },
 } satisfies ExportedHandler<Env>;
 
@@ -156,6 +164,7 @@ export class Family extends DurableObject<Env> {
           return json(this.state(this.weekParam(url.searchParams.get("week"))));
         }
         case "POST /api/plan/validate": return await this.validatePlan(req);
+        case "POST /internal/friday": return await this.fridayRecap();
         case "POST /api/data": {
           const dev = await this.member(req);
           const b = (await req.json()) as Body;
@@ -432,8 +441,20 @@ export class Family extends DurableObject<Env> {
       const rows: string[] = [];
       for (const s of active.filter((x) => x.day === day)) {
         const h = headcount(st, s.id);
-        const dishes = st.dishes.filter((x) => x.slot_id === s.id).map((x) => esc(dishTitle(st, x)));
-        rows.push(`${MEALS[s.meal]} · ${h.estimated ? "≈" : ""}${h.count} pers. : ${dishes.length ? dishes.join(" + ") : "<i>à définir</i>"}`);
+        const dishes = st.dishes.filter((x) => x.slot_id === s.id);
+        rows.push(`${MEALS[s.meal]} · <b>${h.estimated ? "≈" : ""}${h.count} pers.</b> : ${dishes.length ? dishes.map((x) => esc(dishTitle(st, x))).join(" + ") : "<i>à définir</i>"}`);
+        // Portions : quantité totale de chaque ingrédient pour ce repas (sans ceux qui n'en mangent pas)
+        for (const d of dishes) {
+          const parts = st.ingredients.filter((i) => i.dish_id === d.id).map((ing) => {
+            const item = st.items.find((x) => x.id === ing.item_id);
+            if (!item) return "";
+            const n = ingredientPeople(st, d, ing.id);
+            const total = ing.qty_per_person ? fmtAmount(ing.qty_per_person * n, item.unit) : "";
+            const sauf = excludedFor(st, d, ing.id);
+            return `${esc(item.name)}${total ? ` ${total}` : ""}${sauf.length ? ` (sauf ${esc(sauf.join(", "))})` : ""}`;
+          }).filter(Boolean);
+          if (parts.length) rows.push(`    ${parts.join(" · ")}`);
+        }
         if (!h.estimated) rows.push(`    <i>${esc(eatersLabel(h))}</i>`);
       }
       if (rows.length) out.push("", `<b>${dayName(weekStart, day)} ${dayLabel(weekStart, day)}</b>`, ...rows);
@@ -451,6 +472,26 @@ export class Family extends DurableObject<Env> {
     }
     if (cur) parts.push(cur);
     return parts;
+  }
+
+  /** Vendredi 16 h (Paris) : récap des courses et des repas de la semaine qui commence, une seule fois. */
+  async fridayRecap() {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Paris", year: "numeric", month: "2-digit", day: "2-digit", weekday: "short", hour: "2-digit", hourCycle: "h23" })
+      .formatToParts(this.env.TEST_NOW ? new Date(this.env.TEST_NOW) : new Date()).map((p) => [p.type, p.value]));
+    if (parts.weekday !== "Fri" || parts.hour !== "16") return json({ skipped: "pas vendredi 16 h à Paris" });
+    const chat = (this.env.TELEGRAM_PLAN_CHAT_ID ?? "").trim() || this.admin;
+    if (!chat || !this.botToken) return json({ skipped: "bot non configuré" });
+    const week = `${parts.year}-${parts.month}-${parts.day}`; // ce vendredi ouvre la semaine
+    const key = `friday_recap_${week}`;
+    if (this.one("SELECT key FROM meta WHERE key = ?", key)) return json({ skipped: "déjà envoyé" });
+    this.sql.exec("INSERT INTO meta (key, value) VALUES (?, ?)", key, now());
+    let sent = 0;
+    for (const text of Family.chunks(`🔔 <b>Récap du vendredi : c'est le jour des courses !</b>
+
+${this.weekReport(week)}`)) {
+      if ((await this.tg("sendMessage", { chat_id: chat, parse_mode: "HTML", text })).ok) sent++;
+    }
+    return json({ week, sent });
   }
 
   /** Bouton « Valider » : envoie au bot Telegram les courses et le menu des 3 semaines, un message par semaine. */
@@ -530,7 +571,7 @@ export class Family extends DurableObject<Env> {
     const dishId = uuid();
     this.sql.exec("INSERT INTO dishes (id, week_id, name, slot_id, created_at) VALUES (?, ?, ?, ?, ?)", dishId, wk.id, label, slot, now());
     for (const g of list) {
-      const itemId = this.addItem(wk, { name: g.name, unit: g.unit, source: g.source, category: g.category });
+      const itemId = this.dishItem(wk, g);
       this.sql.exec(
         `INSERT INTO dish_ingredients (id, dish_id, item_id, qty_per_person) VALUES (?, ?, ?, ?)
          ON CONFLICT(dish_id, item_id) DO UPDATE SET qty_per_person = excluded.qty_per_person`,
@@ -538,6 +579,19 @@ export class Family extends DurableObject<Env> {
       );
     }
     if (!this.touchedWeeks.includes(String(wk.week_start))) this.touchedWeeks.push(String(wk.week_start));
+  }
+
+  /**
+   * Ingrédient d'un plat : il va dans la liste de courses de la semaine (décoché s'il était déjà acheté),
+   * la quantité à acheter étant calculée d'après les portions et les convives. Seules les épices restent au placard.
+   */
+  dishItem(wk: Row, g: Body): string {
+    const name = str(g.name);
+    const staple = this.one("SELECT theme FROM staples WHERE name_key = ?", nameKey(name));
+    const source = staple?.theme === "epice" ? "placard" : "courses";
+    const id = this.addItem(wk, { name, unit: g.unit, source, category: g.category });
+    if (source === "courses") this.sql.exec("UPDATE items SET source = 'courses', checked = 0 WHERE id = ?", id);
+    return id;
   }
 
   remember(weekStart: string, it: { name: string; source: string; unit: string; quantity: number | null; per_person: boolean; category: string }) {
@@ -736,7 +790,7 @@ export class Family extends DurableObject<Env> {
           if (!it) throw new Bad("Ingrédient introuvable");
           itemId = String(it.id);
         } else {
-          itemId = this.addItem(week, b); // nouvel ingrédient créé à la volée
+          itemId = this.dishItem(week, b); // nouvel ingrédient créé à la volée
         }
         return this.sql.exec(
           `INSERT INTO dish_ingredients (id, dish_id, item_id, qty_per_person) VALUES (?, ?, ?, ?)
