@@ -48,7 +48,7 @@ export interface LibraryDish { name_key: string; name: string; ingredients: Draf
 
 export interface WeekState {
   week: Week; slots: Slot[]; attendance: Attendance[]; items: Item[]; dishes: Dish[]; ingredients: DishIngredient[]; recents: Recent[]; library: LibraryDish[]; exclusions: Exclusion[]; plan: PlanWeek[]; staples: Staple[];
-  whatsapp: { me: { phone: string; weekly: boolean } | null; members: string[] };
+  whatsapp: { me: { phone: string; weekly: boolean } | null; members: string[]; bot: string | null };
 }
 
 /* ---------- Rayons des courses ---------- */

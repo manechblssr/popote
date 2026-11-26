@@ -10,7 +10,14 @@ export interface Env {
   ALLOWED_ORIGINS: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_ADMIN_CHAT_ID?: string;
-  CALLMEBOT_URL?: string; // pour les tests locaux uniquement
+  // Bot WhatsApp officiel (Meta Cloud API)
+  WA_TOKEN?: string;        // jeton d'accès permanent (utilisateur système)
+  WA_PHONE_ID?: string;     // « Phone number ID » du numéro du bot
+  WA_APP_SECRET?: string;   // « App secret » : vérifie que les webhooks viennent bien de Meta
+  WA_VERIFY_TOKEN?: string; // jeton de vérification saisi dans la configuration du webhook
+  WA_NUMBER?: string;       // numéro du bot affiché dans l'appli, ex. +15551234567
+  WA_TEMPLATE?: string;     // modèle approuvé pour l'envoi du jeudi hors fenêtre de 24 h (facultatif)
+  WA_API_URL?: string;      // pour les tests locaux uniquement
 }
 
 /* ------------------------------------------------------------------ */
@@ -161,6 +168,8 @@ export class Family extends DurableObject<Env> {
           return json(this.state(this.weekParam(url.searchParams.get("week")), String(dev.name)));
         }
         case "POST /api/whatsapp/send": return await this.whatsappSend(req);
+        case "GET /whatsapp/webhook": return this.waVerify(url);
+        case "POST /whatsapp/webhook": return await this.waWebhook(req);
         case "POST /internal/weekly": return await this.weeklyWhatsapp();
         case "POST /api/data": {
           const dev = await this.member(req);
@@ -399,19 +408,20 @@ export class Family extends DurableObject<Env> {
     };
   }
 
-  /* ---------------- WhatsApp (CallMeBot) ---------------- */
-  /** Ce que l'appli affiche : son propre numéro masqué (jamais la clé) et qui reçoit les messages. */
+  /* ---------------- WhatsApp (bot officiel Meta) ---------------- */
+  /** Ce que l'appli affiche : son propre numéro masqué, le numéro du bot et qui est inscrit. */
   whatsappInfo(me: string) {
     const mine = me ? this.one("SELECT phone, weekly FROM whatsapp WHERE name_key = ?", nameKey(me)) : undefined;
     const phone = mine ? String(mine.phone) : "";
     return {
       me: mine ? { phone: phone.slice(0, 4) + " •• •• " + phone.slice(-2), weekly: bool(mine.weekly) } : null,
       members: this.q("SELECT name FROM whatsapp ORDER BY name").map((r) => String(r.name)),
+      bot: this.env.WA_TOKEN && this.env.WA_PHONE_ID ? (this.env.WA_NUMBER ?? "") : null,
     };
   }
 
-  /** Texte WhatsApp : courses par rayon puis repas de la semaine. */
-  weekMessage(weekStart: string): string {
+  /** Texte WhatsApp : courses par rayon et/ou repas de la semaine. */
+  weekMessage(weekStart: string, part: "all" | "courses" | "repas" = "all"): string {
     const st = this.state(weekStart) as unknown as WeekState;
     const needed = neededByItem(st);
     const amount = (i: WeekState["items"][number]) => {
@@ -420,55 +430,73 @@ export class Family extends DurableObject<Env> {
       return n ? fmtAmount(n, i.unit) : "";
     };
     const line = (i: WeekState["items"][number]) => `• ${i.name}${amount(i) ? ` : ${amount(i)}` : ""}`;
-    const out: string[] = [`🛒 *Popote · semaine du ${dayLabel(weekStart, 0)} au ${dayLabel(weekStart, 6)}*`, ""];
+    const out: string[] = [`🛒 *Popote · semaine du ${dayLabel(weekStart, 0)} au ${dayLabel(weekStart, 6)}*`];
 
-    const courses = st.items.filter((i) => i.source === "courses" && !i.checked);
-    out.push("*COURSES À FAIRE*");
-    if (!courses.length) out.push("Rien à acheter pour l'instant.");
-    for (const cat of CATEGORIES) {
-      const list = courses.filter((i) => i.category === cat.id).sort((a, b) => a.name.localeCompare(b.name, "fr"));
-      if (list.length) out.push("", `${cat.icon} *${cat.label}*`, ...list.map(line));
-    }
-
-    out.push("", "🍽️ *REPAS DE LA SEMAINE*");
-    let any = false;
-    DAYS.forEach((d, day) => {
-      const slots = st.slots.filter((s) => s.active && s.day === day);
-      const rows: string[] = [];
-      for (const s of slots) {
-        const dishes = st.dishes.filter((x) => x.slot_id === s.id);
-        if (!dishes.length) continue;
-        const h = headcount(st, s.id);
-        rows.push(`  ${MEALS[s.meal]} (${h.estimated ? "≈" : ""}${h.count} pers.) : ${dishes.map((x) => dishTitle(st, x)).join(" + ")}`);
+    if (part !== "repas") {
+      const courses = st.items.filter((i) => i.source === "courses" && !i.checked);
+      out.push("", "*COURSES À FAIRE*");
+      if (!courses.length) out.push("Rien à acheter pour l'instant.");
+      for (const cat of CATEGORIES) {
+        const list = courses.filter((i) => i.category === cat.id).sort((a, b) => a.name.localeCompare(b.name, "fr"));
+        if (list.length) out.push("", `${cat.icon} *${cat.label}*`, ...list.map(line));
       }
-      if (rows.length) { any = true; out.push(`*${d} ${dayLabel(weekStart, day)}*`, ...rows); }
-    });
-    if (!any) out.push("Aucun plat prévu pour l'instant.");
-    return out.join("\n");
+    }
+    if (part !== "courses") {
+      out.push("", "🍽️ *REPAS DE LA SEMAINE*");
+      let any = false;
+      DAYS.forEach((d, day) => {
+        const rows: string[] = [];
+        for (const s of st.slots.filter((x) => x.active && x.day === day)) {
+          const dishes = st.dishes.filter((x) => x.slot_id === s.id);
+          if (!dishes.length) continue;
+          const h = headcount(st, s.id);
+          rows.push(`  ${MEALS[s.meal]} (${h.estimated ? "≈" : ""}${h.count} pers.) : ${dishes.map((x) => dishTitle(st, x)).join(" + ")}`);
+        }
+        if (rows.length) { any = true; out.push(`*${d} ${dayLabel(weekStart, day)}*`, ...rows); }
+      });
+      if (!any) out.push("Aucun plat prévu pour l'instant.");
+    }
+    return out.join("\n").slice(0, 4000); // limite WhatsApp : 4096 caractères
   }
 
-  async callmebot(phone: string, apikey: string, text: string) {
-    const base = this.env.CALLMEBOT_URL ?? "https://api.callmebot.com/whatsapp.php";
-    const url = `${base}?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(text)}&apikey=${encodeURIComponent(apikey)}`;
+  /** Appel à l'API WhatsApp Cloud. Renvoie le code d'erreur Meta en cas d'échec. */
+  async waApi(body: Body): Promise<{ ok: boolean; code?: number }> {
+    if (!this.env.WA_TOKEN || !this.env.WA_PHONE_ID) return { ok: false, code: -1 };
+    const base = this.env.WA_API_URL ?? "https://graph.facebook.com/v22.0";
     try {
-      const res = await fetch(url);
-      const body = (await res.text()).slice(0, 300);
-      const ok = res.ok && !/invalid|error|not\s+allowed/i.test(body);
-      if (!ok) console.error("callmebot", res.status, body);
-      return ok;
+      const res = await fetch(`${base}/${this.env.WA_PHONE_ID}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.env.WA_TOKEN.trim()}` },
+        body: JSON.stringify({ messaging_product: "whatsapp", ...body }),
+      });
+      const out = (await res.json().catch(() => ({}))) as { error?: { code?: number; message?: string } };
+      if (!res.ok) console.error("whatsapp", res.status, JSON.stringify(out.error ?? out));
+      return { ok: res.ok, code: out.error?.code };
     } catch (e) {
-      console.error("callmebot", e);
-      return false;
+      console.error("whatsapp", e);
+      return { ok: false };
     }
   }
+  waText(to: string, text: string) {
+    return this.waApi({ to: to.replace(/^\+/, ""), type: "text", text: { body: text, preview_url: false } });
+  }
 
+  /**
+   * Envoi à des membres. Meta n'autorise un message libre que dans les 24 h qui suivent le dernier message
+   * de la personne au bot (erreur 131047 sinon) : on envoie alors le modèle approuvé, s'il est configuré.
+   */
   async sendWeek(weekStart: string, recipients: Row[], title?: string) {
     const text = (title ? `${title}\n\n` : "") + this.weekMessage(weekStart);
-    const sent: string[] = [], failed: string[] = [];
+    const sent: string[] = [], failed: string[] = [], expired: string[] = [];
     for (const r of recipients) {
-      (await this.callmebot(String(r.phone), String(r.apikey), text) ? sent : failed).push(String(r.name));
+      const res = await this.waText(String(r.phone), text);
+      if (res.ok) { sent.push(String(r.name)); continue; }
+      if (res.code === 131047 && this.env.WA_TEMPLATE) {
+        const t = await this.waApi({ to: String(r.phone).replace(/^\+/, ""), type: "template", template: { name: this.env.WA_TEMPLATE, language: { code: "fr" } } });
+        (t.ok ? sent : failed).push(String(r.name));
+      } else (res.code === 131047 ? expired : failed).push(String(r.name));
     }
-    return { sent, failed };
+    return { sent, failed, expired };
   }
 
   /** « M'envoyer » ou « Envoyer à toute la famille » depuis l'appli. */
@@ -476,10 +504,11 @@ export class Family extends DurableObject<Env> {
     const dev = await this.member(req);
     const b = (await req.json().catch(() => ({}))) as Body;
     const week = this.weekParam(b.week);
+    if (!this.env.WA_TOKEN || !this.env.WA_PHONE_ID) throw new Bad("Le bot WhatsApp n'est pas encore configuré.", 503);
     const recipients = b.to === "all"
       ? this.q("SELECT * FROM whatsapp")
       : this.q("SELECT * FROM whatsapp WHERE name_key = ?", nameKey(String(dev.name)));
-    if (!recipients.length) throw new Bad(b.to === "all" ? "Personne n'a encore activé WhatsApp." : "Activez d'abord WhatsApp dans l'onglet Semaine.");
+    if (!recipients.length) throw new Bad(b.to === "all" ? "Personne n'a encore activé WhatsApp." : "Enregistrez d'abord votre numéro dans l'onglet Semaine.");
     return json(await this.sendWeek(week, recipients));
   }
 
@@ -488,12 +517,49 @@ export class Family extends DurableObject<Env> {
     const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Paris", weekday: "short", hour: "2-digit", hourCycle: "h23" })
       .formatToParts(new Date()).map((p) => [p.type, p.value]));
     if (parts.weekday !== "Thu" || parts.hour !== "19") return json({ skipped: "pas jeudi 19 h à Paris" });
+    if (!this.env.WA_TOKEN || !this.env.WA_PHONE_ID) return json({ skipped: "bot non configuré" });
     const next = addDaysIso(mondayOf(new Date()), 7);
     const key = `weekly_whatsapp_${next}`;
     if (this.one("SELECT key FROM meta WHERE key = ?", key)) return json({ skipped: "déjà envoyé" });
     this.sql.exec("INSERT INTO meta (key, value) VALUES (?, ?)", key, now());
-    const result = await this.sendWeek(next, this.q("SELECT * FROM whatsapp WHERE weekly = 1"), "📅 Pour la semaine prochaine");
-    return json(result);
+    return json(await this.sendWeek(next, this.q("SELECT * FROM whatsapp WHERE weekly = 1"), "📅 Pour la semaine prochaine"));
+  }
+
+  /** Vérification du webhook par Meta (une fois, lors de la configuration). */
+  waVerify(url: URL) {
+    const token = this.env.WA_VERIFY_TOKEN ?? "";
+    if (url.searchParams.get("hub.mode") === "subscribe" && token && safeEqual(url.searchParams.get("hub.verify_token") ?? "", token)) {
+      return new Response(url.searchParams.get("hub.challenge") ?? "", { status: 200 });
+    }
+    return json({ error: "forbidden" }, 403);
+  }
+
+  /** Messages reçus par le bot : « courses », « repas », « semaine prochaine »… */
+  async waWebhook(req: Request) {
+    const raw = await req.text();
+    const secret = this.env.WA_APP_SECRET?.trim();
+    if (!secret) return json({ error: "non configuré" }, 503);
+    const sig = (req.headers.get("X-Hub-Signature-256") ?? "").replace(/^sha256=/, "");
+    if (!safeEqual(sig, await hmac(secret, raw))) return json({ error: "forbidden" }, 403);
+
+    const body = JSON.parse(raw || "{}") as any;
+    for (const entry of body.entry ?? []) for (const change of entry.changes ?? []) {
+      for (const m of change.value?.messages ?? []) {
+        const from = String(m.from ?? "");
+        const text = String(m.text?.body ?? m.button?.text ?? m.interactive?.button_reply?.title ?? "").toLowerCase();
+        const member = this.q("SELECT * FROM whatsapp").find((r) => String(r.phone).replace(/^\+/, "") === from);
+        if (!member) {
+          await this.waText(from, "Bonjour ! Ce numéro n'est pas inscrit sur Popote. Ajoutez-le dans l'appli : onglet Semaine › WhatsApp.");
+          continue;
+        }
+        const thisWeek = mondayOf(new Date());
+        const week = /proch|suivant|recevoir/.test(text) ? addDaysIso(thisWeek, 7) : thisWeek;
+        const part = /course|liste|achat/.test(text) ? "courses" : /repas|menu|plat|manger/.test(text) ? "repas" : "all";
+        const help = "\n\n_Écrivez « courses », « repas » ou « semaine prochaine »._";
+        await this.waText(from, this.weekMessage(week, part) + help);
+      }
+    }
+    return json({ ok: true });
   }
 
   /** Repas d'une semaine (et plats déjà placés) pour le choix multi-repas sur 3 semaines. */
@@ -682,13 +748,11 @@ export class Family extends DurableObject<Env> {
         );
         return;
       }
-      // WhatsApp (CallMeBot) : chacun enregistre son propre numéro et sa clé
+      // WhatsApp : chacun enregistre son propre numéro (seuls ces numéros peuvent interroger le bot)
       case "wa.set": {
         const phone = typeof b.phone === "string" ? b.phone.replace(/[\s.()-]/g, "") : "";
         if (!/^\+\d{8,15}$/.test(phone)) throw new Bad("Numéro au format international, ex. +33612345678");
-        const prev = this.one("SELECT apikey FROM whatsapp WHERE name_key = ?", nameKey(me));
-        const apikey = typeof b.apikey === "string" && b.apikey.trim() ? b.apikey.trim() : String(prev?.apikey ?? "");
-        if (!/^[A-Za-z0-9]{4,32}$/.test(apikey)) throw new Bad("Clé CallMeBot invalide");
+        const apikey = "";
         this.sql.exec(
           `INSERT INTO whatsapp (name_key, name, phone, apikey, weekly, created_at) VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(name_key) DO UPDATE SET name = excluded.name, phone = excluded.phone, apikey = excluded.apikey, weekly = excluded.weekly`,

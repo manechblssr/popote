@@ -21,7 +21,7 @@ function normalize(d: Partial<WeekState> & { week: WeekState["week"] }): WeekSta
     exclusions: d.exclusions ?? [],
     plan: d.plan ?? [],
     staples: d.staples ?? [],
-    whatsapp: d.whatsapp ?? { me: null, members: [] },
+    whatsapp: d.whatsapp ?? { me: null, members: [], bot: null },
   };
 }
 
