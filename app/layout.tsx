@@ -10,12 +10,18 @@ export const metadata: Metadata = {
   description: "Courses, placard et repas de la semaine, en famille.",
   appleWebApp: { capable: true, title: "Popote", statusBarStyle: "default" },
 };
-export const viewport: Viewport = { themeColor: "#0f3b2e", width: "device-width", initialScale: 1, viewportFit: "cover" };
+export const viewport: Viewport = { themeColor: "#0f3b2e", width: "device-width", initialScale: 1, maximumScale: 1, userScalable: false, viewportFit: "cover" };
+
+/** Safari iOS ignore user-scalable=no : on bloque le pincement à la main. */
+const NO_ZOOM = `(function(){var s=function(e){e.preventDefault()};["gesturestart","gesturechange","gestureend"].forEach(function(t){document.addEventListener(t,s,{passive:false})});document.addEventListener("touchmove",function(e){if(e.touches.length>1)e.preventDefault()},{passive:false})})();`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="fr" className={`${body.variable} ${display.variable}`}>
-      <body>{children}</body>
+      <body>
+        <script dangerouslySetInnerHTML={{ __html: NO_ZOOM }} />
+        {children}
+      </body>
     </html>
   );
 }
