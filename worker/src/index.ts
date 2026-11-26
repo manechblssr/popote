@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import {
-  CATEGORIES, DEFAULT_STAPLES, MEALS, addDays as addDaysIso, dayLabel, dayName, fmtAmount, guessCategory, isCategory, isTheme, isWeekStart, nameKey, weekStartOf, weekdayOf,
+  CATEGORIES, DEFAULT_STAPLES, MEALS, addDays as addDaysIso, dayLabel, dayName, fmtQty, guessCategory, isCategory, isTheme, isWeekStart, nameKey, weekStartOf, weekdayOf,
   type Category, type WeekState,
 } from "../../lib/types";
 import { dishTitle, eatersLabel, excludedFor, headcount, ingredientPeople, neededByItem } from "../../lib/compute";
@@ -75,6 +75,14 @@ const now = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const bool = (v: SqlStorageValue) => v === 1;
+/** Quantité lisible : « × 2 » pour des pièces, « 3 tranches », « 360 g ». */
+const PLURAL = new Set(["tranche", "boîte", "paquet", "botte", "gousse", "cube", "pincée"]);
+function qtyText(q: number, unit: string) {
+  if (!q) return "";
+  const n = fmtQty(q);
+  if (!unit || unit === "pièce") return `× ${n}`;
+  return PLURAL.has(unit) && q > 1 ? `${n} ${unit}s` : `${n} ${unit}`;
+}
 const catOf = (r: Row): Category => (isCategory(r.category) ? r.category : guessCategory(String(r.name)));
 
 async function sha256(s: string) {
@@ -455,60 +463,72 @@ export class Family extends DurableObject<Env> {
     try { return JSON.parse(String(r.value)) as { by: string; at: string }; } catch { return null; }
   }
 
-  /** Message Telegram (HTML) d'une semaine : courses par rayon puis menu jour par jour. */
+  /** Message Telegram (HTML) d'une semaine : courses par rayon puis menu jour par jour, aéré et lisible sur téléphone. */
   weekReport(weekStart: string): string {
     const st = this.state(weekStart) as unknown as WeekState;
     const needed = neededByItem(st);
-    const amount = (i: WeekState["items"][number]) => {
-      if (i.quantity != null && i.quantity > 0) return fmtAmount(i.per_person ? i.quantity * st.week.default_people : i.quantity, i.unit);
-      const n = needed.get(i.id);
-      return n ? fmtAmount(n, i.unit) : "";
+    const total = (i: WeekState["items"][number]) => {
+      if (i.quantity != null && i.quantity > 0) return i.per_person ? i.quantity * st.week.default_people : i.quantity;
+      return needed.get(i.id) ?? 0;
     };
-    const out: string[] = [`📅 <b>Semaine du vendredi ${dayLabel(weekStart, 0)} au jeudi ${dayLabel(weekStart, 6)}</b>`];
+    const active = st.slots.filter((s) => s.active);
+    const covers = active.reduce((n, s) => n + headcount(st, s.id).count, 0);
+    const blocks: string[] = [];
 
+    blocks.push([
+      `🗓 <b>Semaine du ${dayLabel(weekStart, 0)} au ${dayLabel(weekStart, 6)}</b>`,
+      `<i>${active.length} repas · ${covers} couverts</i>`,
+    ].join("\n"));
+
+    // Courses, rayon par rayon
     const courses = st.items.filter((i) => i.source === "courses" && !i.checked);
-    out.push("", "🛒 <b>COURSES À FAIRE</b>");
-    if (!courses.length) out.push("Rien à acheter.");
+    blocks.push("🛒 <b>COURSES</b>" + (courses.length ? "" : "\n<i>Rien à acheter</i>"));
     for (const cat of CATEGORIES) {
       const list = courses.filter((i) => i.category === cat.id).sort((a, b) => a.name.localeCompare(b.name, "fr"));
-      if (list.length) out.push("", `${cat.icon} <i>${cat.label}</i>`, ...list.map((i) => `• ${esc(i.name)}${amount(i) ? ` : ${amount(i)}` : ""}`));
+      if (!list.length) continue;
+      blocks.push([
+        `${cat.icon} <b>${cat.label}</b>`,
+        ...list.map((i) => { const q = qtyText(total(i), i.unit); return `▫️ ${esc(i.name)}${q ? `  <b>${q}</b>` : ""}`; }),
+      ].join("\n"));
     }
 
-    out.push("", "🍽️ <b>MENU</b>");
-    const active = st.slots.filter((s) => s.active);
-    if (!active.length) out.push("Aucun repas prévu.");
+    // Menu, jour par jour
+    blocks.push("🍽 <b>MENU</b>" + (active.length ? "" : "\n<i>Aucun repas prévu</i>"));
     for (let day = 0; day < 7; day++) {
-      const rows: string[] = [];
-      for (const s of active.filter((x) => x.day === day)) {
+      const meals = active.filter((x) => x.day === day).sort((a, b) => (a.meal === "lunch" ? -1 : 1) - (b.meal === "lunch" ? -1 : 1));
+      if (!meals.length) continue;
+      const lines = [`<b>${dayName(weekStart, day).toUpperCase()} ${dayLabel(weekStart, day)}</b>`];
+      for (const s of meals) {
         const h = headcount(st, s.id);
         const dishes = st.dishes.filter((x) => x.slot_id === s.id);
-        rows.push(`${MEALS[s.meal]} · <b>${h.estimated ? "≈" : ""}${h.count} pers.</b> : ${dishes.length ? dishes.map((x) => esc(dishTitle(st, x))).join(" + ") : "<i>à définir</i>"}`);
-        // Portions : quantité totale de chaque ingrédient pour ce repas (sans ceux qui n'en mangent pas)
+        const inner: string[] = [];
         for (const d of dishes) {
+          // Portions du repas : quantité totale de chaque ingrédient (sans ceux qui n'en mangent pas)
           const parts = st.ingredients.filter((i) => i.dish_id === d.id).map((ing) => {
             const item = st.items.find((x) => x.id === ing.item_id);
             if (!item) return "";
-            const n = ingredientPeople(st, d, ing.id);
-            const total = ing.qty_per_person ? fmtAmount(ing.qty_per_person * n, item.unit) : "";
+            const q = ing.qty_per_person ? qtyText(ing.qty_per_person * ingredientPeople(st, d, ing.id), item.unit) : "";
             const sauf = excludedFor(st, d, ing.id);
-            return `${esc(item.name)}${total ? ` ${total}` : ""}${sauf.length ? ` (sauf ${esc(sauf.join(", "))})` : ""}`;
+            return `${esc(item.name)}${q ? ` <b>${q}</b>` : ""}${sauf.length ? ` <i>(sauf ${esc(sauf.join(", "))})</i>` : ""}`;
           }).filter(Boolean);
-          if (parts.length) rows.push(`    ${parts.join(" · ")}`);
+          inner.push(`🍲 ${parts.length ? parts.join(" · ") : esc(dishTitle(st, d))}`);
         }
-        if (!h.estimated) rows.push(`    <i>${esc(eatersLabel(h))}</i>`);
+        if (!dishes.length) inner.push("<i>Rien de prévu</i>");
+        inner.push(h.estimated ? `<i>👥 ≈ ${h.count} (personne n'a encore coché)</i>` : `<i>👥 ${esc(eatersLabel(h).replace(/^Mangent ici : /, ""))}</i>`);
+        lines.push(`${s.meal === "lunch" ? "☀️" : "🌙"} <b>${MEALS[s.meal]}</b> · ${h.count} pers.`, `<blockquote>${inner.join("\n")}</blockquote>`);
       }
-      if (rows.length) out.push("", `<b>${dayName(weekStart, day)} ${dayLabel(weekStart, day)}</b>`, ...rows);
+      blocks.push(lines.join("\n"));
     }
-    return out.join("\n");
+    return blocks.join("\n\n");
   }
 
-  /** Découpe un long message en morceaux sous la limite Telegram (4 096 caractères), aux retours à la ligne. */
+  /** Découpe un long message sous la limite Telegram (4 096 caractères), entre deux paragraphes pour ne pas couper une balise. */
   static chunks(text: string, max = 3900): string[] {
     const parts: string[] = [];
     let cur = "";
-    for (const line of text.split("\n")) {
-      if (cur && cur.length + line.length + 1 > max) { parts.push(cur); cur = ""; }
-      cur = cur ? `${cur}\n${line}` : line.slice(0, max);
+    for (const block of text.split("\n\n")) {
+      if (cur && cur.length + block.length + 2 > max) { parts.push(cur); cur = ""; }
+      cur = cur ? `${cur}\n\n${block}` : block.slice(0, max);
     }
     if (cur) parts.push(cur);
     return parts;
@@ -582,9 +602,7 @@ export class Family extends DurableObject<Env> {
     if (this.one("SELECT key FROM meta WHERE key = ?", key)) return json({ skipped: "déjà envoyé" });
     this.sql.exec("INSERT INTO meta (key, value) VALUES (?, ?)", key, now());
     let sent = 0;
-    for (const text of Family.chunks(`🔔 <b>Récap du vendredi : c'est le jour des courses !</b>
-
-${this.weekReport(week)}`)) {
+    for (const text of Family.chunks(`🔔 <b>C'est vendredi, jour des courses !</b>\n\n${this.weekReport(week)}`)) {
       if ((await this.tg("sendMessage", { chat_id: chat, parse_mode: "HTML", text })).ok) sent++;
     }
     return json({ week, sent });
@@ -600,7 +618,7 @@ ${this.weekReport(week)}`)) {
     const weeks = [0, 7, 14].map((n) => addDaysIso(first, n));
     const head = await this.tg("sendMessage", {
       chat_id: chat, parse_mode: "HTML",
-      text: `✅ <b>Planning validé par ${esc(String(dev.name))}</b>\nCourses et menus des 3 semaines, du vendredi ${dayLabel(first, 0)} au jeudi ${dayLabel(weeks[2], 6)}`,
+      text: `✅ <b>Planning validé</b> par ${esc(String(dev.name))}\n<i>3 semaines, du ${dayLabel(first, 0)} au ${dayLabel(weeks[2], 6)} : un message par semaine</i>`,
     });
     if (!head.ok) throw new Bad("Telegram n'a pas accepté le message, réessayez.", 502);
     const at = now();
