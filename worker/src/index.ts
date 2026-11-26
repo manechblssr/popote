@@ -316,13 +316,20 @@ export class Family extends DurableObject<Env> {
 
     // « /simulation » : 3 semaines de données fictives, préparées dans une base de démonstration séparée
     // (les vraies courses et les vrais repas de la famille ne sont pas touchés)
-    if (msg?.text && /^\/simulation\b/.test(msg.text)) {
+    // « /simulation_semaine » : une seule semaine, comme le récap automatique du vendredi 16 h
+    if (msg?.text && /^\/simulation(_semaine)?\b/.test(msg.text)) {
       const plan = (this.env.TELEGRAM_PLAN_CHAT_ID ?? "").trim();
       const allowed = [this.admin, plan].filter(Boolean);
       if (allowed.includes(String(msg.chat?.id)) || allowed.includes(String(msg.from?.id))) {
         const demo = this.env.FAMILY.get(this.env.FAMILY.idFromName("demo"));
         const res = await demo.fetch("https://popote.internal/internal/demo", { method: "POST" });
         const { weeks } = (await res.json()) as { weeks: string[] };
+        if (msg.text.startsWith("/simulation_semaine")) {
+          for (const text of Family.chunks(`🧪 <i>Simulation (données fictives)</i>\n🔔 <b>C'est vendredi, jour des courses !</b>\n\n${weeks[0]}`)) {
+            await this.tg("sendMessage", { chat_id: msg.chat.id, parse_mode: "HTML", text });
+          }
+          return json({ ok: true });
+        }
         await this.tg("sendMessage", {
           chat_id: msg.chat.id, parse_mode: "HTML",
           text: "🧪 <b>SIMULATION</b> (données fictives)\nVoici ce que vous recevrez en appuyant sur « Valider » : un message par semaine, sur 3 semaines.",
