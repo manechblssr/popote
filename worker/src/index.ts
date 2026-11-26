@@ -165,6 +165,11 @@ export class Family extends DurableObject<Env> {
         }
         case "POST /api/plan/validate": return await this.validatePlan(req);
         case "POST /internal/friday": return await this.fridayRecap();
+        case "POST /internal/demo": {
+          // Uniquement dans la base de démonstration
+          if (this.ctx.id.toString() === this.env.FAMILY.idFromName("family").toString()) return json({ error: "interdit" }, 403);
+          return json({ weeks: this.seedDemo() });
+        }
         case "POST /api/data": {
           const dev = await this.member(req);
           const b = (await req.json()) as Body;
@@ -296,6 +301,28 @@ export class Family extends DurableObject<Env> {
         const week = weekStartOf(new Date(Date.now() + 3600_000)); // ≈ heure de Paris
         for (const text of Family.chunks(`🔔 <b>Récap de la semaine</b>\n\n${this.weekReport(week)}`)) {
           await this.tg("sendMessage", { chat_id: msg.chat.id, parse_mode: "HTML", text });
+        }
+      }
+      return json({ ok: true });
+    }
+
+    // « /simulation » : 3 semaines de données fictives, préparées dans une base de démonstration séparée
+    // (les vraies courses et les vrais repas de la famille ne sont pas touchés)
+    if (msg?.text && /^\/simulation\b/.test(msg.text)) {
+      const plan = (this.env.TELEGRAM_PLAN_CHAT_ID ?? "").trim();
+      const allowed = [this.admin, plan].filter(Boolean);
+      if (allowed.includes(String(msg.chat?.id)) || allowed.includes(String(msg.from?.id))) {
+        const demo = this.env.FAMILY.get(this.env.FAMILY.idFromName("demo"));
+        const res = await demo.fetch("https://popote.internal/internal/demo", { method: "POST" });
+        const { weeks } = (await res.json()) as { weeks: string[] };
+        await this.tg("sendMessage", {
+          chat_id: msg.chat.id, parse_mode: "HTML",
+          text: "🧪 <b>SIMULATION</b> (données fictives)\nVoici ce que vous recevrez en appuyant sur « Valider » : un message par semaine, sur 3 semaines.",
+        });
+        for (const report of weeks) {
+          for (const text of Family.chunks(`🧪 <i>Simulation</i>\n${report}`)) {
+            await this.tg("sendMessage", { chat_id: msg.chat.id, parse_mode: "HTML", text });
+          }
         }
       }
       return json({ ok: true });
@@ -485,6 +512,62 @@ export class Family extends DurableObject<Env> {
     }
     if (cur) parts.push(cur);
     return parts;
+  }
+
+  /** Base de démonstration : efface tout puis prépare 3 semaines fictives ; renvoie le récap de chacune. */
+  seedDemo(): string[] {
+    for (const t of ["weeks", "slots", "attendance", "items", "dishes", "dish_ingredients", "exclusions", "ingredient_memory"]) this.sql.exec(`DELETE FROM ${t}`);
+    const first = weekStartOf(new Date(Date.now() + 3600_000));
+    const weeks = [0, 7, 14].map((n) => addDaysIso(first, n));
+    const g = (name: string, qty: number, unit: string) => ({ name, qty_per_person: qty, unit });
+    const P = {
+      bolo: [g("Pâtes", 100, "g"), g("Bœuf haché", 120, "g"), g("Sauce tomate", 80, "g"), g("Oignons", 0.5, "pièce")],
+      curry: [g("Blanc de poulet", 150, "g"), g("Riz", 75, "g"), g("Curry", 1, "c. à c."), g("Crème fraîche", 3, "c. à s.")],
+      saumon: [g("Saumon", 1, "pièce"), g("Riz", 75, "g"), g("Brocolis", 150, "g")],
+      lentilles: [g("Lentilles", 200, "g"), g("Carottes", 1, "pièce"), g("Oignons", 0.5, "pièce"), g("Cumin", 0.5, "c. à c.")],
+      burger: [g("Pain burger", 1, "pièce"), g("Steak haché", 1, "pièce"), g("Cheddar", 1, "tranche"), g("Tomates", 0.5, "pièce")],
+      quinoa: [g("Quinoa", 70, "g"), g("Courgettes", 1, "pièce"), g("Feta", 40, "g"), g("Huile d'olive", 1, "c. à s.")],
+      omelette: [g("Œufs", 2, "pièce"), g("Jambon", 1, "tranche"), g("Salade", 0.25, "pièce"), g("Baguette", 0.25, "pièce")],
+      cordon: [g("Cordon bleu", 1, "pièce"), g("Haricots verts", 120, "g")],
+      pesto: [g("Pâtes", 100, "g"), g("Pesto", 1, "c. à s."), g("Mozzarella", 0.5, "pièce")],
+    };
+    // [semaine, jour (0 = vendredi), repas, plat]
+    const menu: [number, number, "lunch" | "dinner", Body[]][] = [
+      [0, 0, "dinner", P.burger], [0, 1, "lunch", P.omelette], [0, 1, "dinner", P.bolo], [0, 2, "lunch", P.saumon], [0, 2, "dinner", P.cordon],
+      [0, 3, "dinner", P.curry], [0, 4, "dinner", P.lentilles], [0, 5, "dinner", P.quinoa], [0, 6, "dinner", P.pesto],
+      [1, 0, "dinner", P.curry], [1, 1, "lunch", P.bolo], [1, 1, "dinner", P.omelette], [1, 2, "lunch", P.burger], [1, 2, "dinner", P.quinoa],
+      [1, 3, "dinner", P.cordon], [1, 4, "dinner", P.saumon], [1, 5, "dinner", P.lentilles],
+      [2, 0, "dinner", P.pesto], [2, 1, "lunch", P.saumon], [2, 1, "dinner", P.burger], [2, 2, "lunch", P.curry],
+      [2, 3, "dinner", P.bolo], [2, 4, "dinner", P.omelette], [2, 5, "dinner", P.quinoa], [2, 6, "dinner", P.cordon],
+    ];
+    const people = ["Manech", "Calista", "Léo"];
+    weeks.forEach((ws, wi) => {
+      const wk = this.ensureWeek(ws);
+      this.sql.exec("UPDATE weeks SET default_people = 3, configured = 1 WHERE id = ?", wk.id);
+      // Soirs tous les jours, midis le week-end (samedi, dimanche)
+      this.sql.exec("UPDATE slots SET active = CASE WHEN meal = 'dinner' OR day IN (1, 2) THEN 1 ELSE 0 END WHERE week_id = ?", wk.id);
+      for (const s of this.q("SELECT id, day, meal FROM slots WHERE week_id = ? AND active = 1", wk.id)) {
+        const day = Number(s.day);
+        // Chacun coche ses repas : Léo n'est là que le week-end, Calista absente le lundi soir
+        this.setPresence(String(s.id), "Manech", true);
+        if (!(day === 3 && s.meal === "dinner")) this.setPresence(String(s.id), "Calista", true);
+        if (day === 1 || day === 2) this.setPresence(String(s.id), people[2], true);
+        if (wi === 1 && day === 1 && s.meal === "dinner") this.sql.exec("UPDATE slots SET guests = 2 WHERE id = ?", s.id);
+      }
+      this.addItem(wk, { name: "Pommes", quantity: 6, unit: "pièce", source: "courses" });
+      this.addItem(wk, { name: "Yaourts nature", quantity: 2, unit: "paquet", source: "courses" });
+    });
+    for (const [wi, day, meal, list] of menu) {
+      const wk = this.ensureWeek(weeks[wi]);
+      const s = this.one("SELECT id FROM slots WHERE week_id = ? AND day = ? AND meal = ?", wk.id, day, meal);
+      this.createDish(wk, s ? String(s.id) : null, list);
+    }
+    // Léo signale qu'il ne mange pas de saumon
+    for (const r of this.q(`SELECT di.id FROM dish_ingredients di JOIN items i ON i.id = di.item_id WHERE i.name = 'Saumon'`)) {
+      this.sql.exec("INSERT OR IGNORE INTO exclusions (ingredient_id, name_key, name) VALUES (?, ?, ?)", r.id, nameKey(people[2]), people[2]);
+    }
+    this.touchedWeeks = [];
+    return weeks.map((w) => this.weekReport(w));
   }
 
   /** Vendredi 16 h (Paris) : récap des courses et des repas de la semaine qui commence, une seule fois. */
