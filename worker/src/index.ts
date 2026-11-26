@@ -1,23 +1,17 @@
 import { DurableObject } from "cloudflare:workers";
 import {
-  CATEGORIES, DAYS, DEFAULT_STAPLES, MEALS, addDays as addDaysIso, dayLabel, fmtAmount, guessCategory, isCategory, isMonday, isTheme, mondayOf, nameKey,
+  CATEGORIES, DEFAULT_STAPLES, MEALS, addDays as addDaysIso, dayLabel, dayName, fmtAmount, guessCategory, isCategory, isTheme, isWeekStart, nameKey, weekdayOf,
   type Category, type WeekState,
 } from "../../lib/types";
-import { dishTitle, headcount, neededByItem } from "../../lib/compute";
+import { dishTitle, eatersLabel, headcount, neededByItem } from "../../lib/compute";
 
 export interface Env {
   FAMILY: DurableObjectNamespace<Family>;
   ALLOWED_ORIGINS: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_ADMIN_CHAT_ID?: string;
-  // Bot WhatsApp officiel (Meta Cloud API)
-  WA_TOKEN?: string;        // jeton d'accès permanent (utilisateur système)
-  WA_PHONE_ID?: string;     // « Phone number ID » du numéro du bot
-  WA_APP_SECRET?: string;   // « App secret » : vérifie que les webhooks viennent bien de Meta
-  WA_VERIFY_TOKEN?: string; // jeton de vérification saisi dans la configuration du webhook
-  WA_NUMBER?: string;       // numéro du bot affiché dans l'appli, ex. +15551234567
-  WA_TEMPLATE?: string;     // modèle approuvé pour l'envoi du jeudi hors fenêtre de 24 h (facultatif)
-  WA_API_URL?: string;      // pour les tests locaux uniquement
+  TELEGRAM_API_URL?: string; // pour les tests locaux uniquement
+  TELEGRAM_PLAN_CHAT_ID?: string; // conversation (ou groupe) qui reçoit le planning validé ; par défaut celle de l'administrateur
 }
 
 /* ------------------------------------------------------------------ */
@@ -31,7 +25,6 @@ export default {
       ? { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Max-Age": "86400", Vary: "Origin" }
       : {};
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
-    if (new URL(req.url).pathname.startsWith("/internal/")) return new Response("Introuvable", { status: 404 });
 
     const stub = env.FAMILY.get(env.FAMILY.idFromName("family"));
     const res = await stub.fetch(req);
@@ -39,12 +32,6 @@ export default {
     const out = new Response(res.body, res);
     for (const [k, v] of Object.entries(cors)) out.headers.set(k, v);
     return out;
-  },
-
-  // Déclenché le jeudi à 17 h et 18 h UTC : le Durable Object n'envoie qu'à 19 h, heure de Paris (été comme hiver)
-  async scheduled(_event: ScheduledController, env: Env) {
-    const stub = env.FAMILY.get(env.FAMILY.idFromName("family"));
-    await stub.fetch("https://popote.internal/internal/weekly", { method: "POST" });
   },
 } satisfies ExportedHandler<Env>;
 
@@ -106,7 +93,6 @@ CREATE TABLE IF NOT EXISTS attendance (slot_id TEXT NOT NULL, name_key TEXT NOT 
 CREATE TABLE IF NOT EXISTS exclusions (ingredient_id TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (ingredient_id, name_key));
 CREATE TABLE IF NOT EXISTS staples (name_key TEXT PRIMARY KEY, name TEXT NOT NULL, theme TEXT NOT NULL, unit TEXT NOT NULL DEFAULT '', qty_per_person REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS whatsapp (name_key TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL, apikey TEXT NOT NULL, weekly INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, quantity REAL, unit TEXT NOT NULL DEFAULT '', per_person INTEGER NOT NULL DEFAULT 0, checked INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS items_week ON items(week_id);
 CREATE TABLE IF NOT EXISTS dishes (id TEXT PRIMARY KEY, week_id TEXT NOT NULL, name TEXT NOT NULL, slot_id TEXT, created_at TEXT NOT NULL);
@@ -136,6 +122,8 @@ export class Family extends DurableObject<Env> {
     // Migration : rayon des courses
     this.addColumn("items", "category", "TEXT NOT NULL DEFAULT ''");
     this.addColumn("ingredient_memory", "category", "TEXT NOT NULL DEFAULT ''");
+    // Le bot WhatsApp a été retiré : on efface les numéros enregistrés
+    this.sql.exec("DROP TABLE IF EXISTS whatsapp");
     // Ingrédients permanents de départ, insérés une seule fois (ceux retirés ensuite ne reviennent pas)
     if (!this.one("SELECT key FROM meta WHERE key = 'staples_seeded'")) {
       for (const [name, theme, qty, unit] of DEFAULT_STAPLES) {
@@ -164,13 +152,10 @@ export class Family extends DurableObject<Env> {
         case "POST /api/auth/request": return await this.authRequest(req);
         case "POST /api/auth/status": return await this.authStatus(req);
         case "GET /api/data": {
-          const dev = await this.member(req);
-          return json(this.state(this.weekParam(url.searchParams.get("week")), String(dev.name)));
+          await this.member(req);
+          return json(this.state(this.weekParam(url.searchParams.get("week"))));
         }
-        case "POST /api/whatsapp/send": return await this.whatsappSend(req);
-        case "GET /whatsapp/webhook": return this.waVerify(url);
-        case "POST /whatsapp/webhook": return await this.waWebhook(req);
-        case "POST /internal/weekly": return await this.weeklyWhatsapp();
+        case "POST /api/plan/validate": return await this.validatePlan(req);
         case "POST /api/data": {
           const dev = await this.member(req);
           const b = (await req.json()) as Body;
@@ -179,7 +164,7 @@ export class Family extends DurableObject<Env> {
           this.notifyFamily(week);
           for (const other of this.touchedWeeks) if (other !== week) this.notifyFamily(other);
           this.touchedWeeks = [];
-          return json(this.state(week, String(dev.name)));
+          return json(this.state(week));
         }
         case "POST /telegram/webhook": return await this.telegram(req);
         case "GET /telegram/setup": return await this.setupWebhook(url);
@@ -261,7 +246,7 @@ export class Family extends DurableObject<Env> {
 
   /* ---------------- Telegram ---------------- */
   async tg(method: string, body: Body): Promise<{ ok?: boolean; [k: string]: unknown }> {
-    const res = await fetch(`https://api.telegram.org/bot${this.botToken}/${method}`, {
+    const res = await fetch(`${this.env.TELEGRAM_API_URL ?? "https://api.telegram.org"}/bot${this.botToken}/${method}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     const out = (await res.json().catch(() => ({}))) as { ok?: boolean };
@@ -367,7 +352,13 @@ export class Family extends DurableObject<Env> {
 
   /* ---------------- Données de la semaine ---------------- */
   weekParam(v: unknown) {
-    if (typeof v !== "string" || !isMonday(v)) throw new Bad("Semaine invalide");
+    if (typeof v !== "string" || !isWeekStart(v)) throw new Bad("Semaine invalide");
+    return v;
+  }
+
+  /** Semaine enregistrée à reprendre : les anciennes semaines commençaient le lundi. */
+  weekParamAny(v: unknown) {
+    if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new Bad("Semaine invalide");
     return v;
   }
 
@@ -384,12 +375,12 @@ export class Family extends DurableObject<Env> {
     return week;
   }
 
-  state(weekStart: string, me = "") {
+  state(weekStart: string) {
     const w = this.ensureWeek(weekStart);
     const wid = String(w.id);
     const items = this.q("SELECT * FROM items WHERE week_id = ? ORDER BY created_at", wid).map((r) => ({ ...r, per_person: bool(r.per_person), checked: bool(r.checked), category: catOf(r) }));
     const dishes = this.q("SELECT * FROM dishes WHERE week_id = ? ORDER BY created_at", wid);
-    const ingredients = this.q("SELECT di.* FROM dish_ingredients di JOIN dishes d ON d.id = di.dish_id WHERE d.week_id = ?", wid);
+    const ingredients = this.q("SELECT di.* FROM dish_ingredients di JOIN dishes d ON d.id = di.dish_id WHERE d.week_id = ? ORDER BY di.rowid", wid);
     const present = new Set(items.map((i) => nameKey(String((i as unknown as Row).name))));
     const recents = this.q("SELECT * FROM ingredient_memory ORDER BY last_week DESC, uses DESC LIMIT 120")
       .filter((r) => !present.has(String(r.name_key))).slice(0, 40).map((r) => ({ ...r, per_person: bool(r.per_person), category: catOf(r) }));
@@ -403,25 +394,20 @@ export class Family extends DurableObject<Env> {
          JOIN dishes d ON d.id = di.dish_id WHERE d.week_id = ? ORDER BY e.name`, wid),
       plan: [0, 7, 14].map((n) => this.planWeek(addDaysIso(weekStart, n))),
       staples: this.q("SELECT * FROM staples ORDER BY name"),
-      whatsapp: this.whatsappInfo(me),
-      library: this.library(),
+      library: this.library(weekStart),
+      validated: this.validated(weekStart),
     };
   }
 
-  /* ---------------- WhatsApp (bot officiel Meta) ---------------- */
-  /** Ce que l'appli affiche : son propre numéro masqué, le numéro du bot et qui est inscrit. */
-  whatsappInfo(me: string) {
-    const mine = me ? this.one("SELECT phone, weekly FROM whatsapp WHERE name_key = ?", nameKey(me)) : undefined;
-    const phone = mine ? String(mine.phone) : "";
-    return {
-      me: mine ? { phone: phone.slice(0, 4) + " •• •• " + phone.slice(-2), weekly: bool(mine.weekly) } : null,
-      members: this.q("SELECT name FROM whatsapp ORDER BY name").map((r) => String(r.name)),
-      bot: this.env.WA_TOKEN && this.env.WA_PHONE_ID ? (this.env.WA_NUMBER ?? "").trim() : null,
-    };
+  /* ---------------- Planning validé → Telegram ---------------- */
+  validated(weekStart: string) {
+    const r = this.one("SELECT value FROM meta WHERE key = ?", `validated_${weekStart}`);
+    if (!r) return null;
+    try { return JSON.parse(String(r.value)) as { by: string; at: string }; } catch { return null; }
   }
 
-  /** Texte WhatsApp : courses par rayon et/ou repas de la semaine. */
-  weekMessage(weekStart: string, part: "all" | "courses" | "repas" = "all"): string {
+  /** Message Telegram (HTML) d'une semaine : courses par rayon puis menu jour par jour. */
+  weekReport(weekStart: string): string {
     const st = this.state(weekStart) as unknown as WeekState;
     const needed = neededByItem(st);
     const amount = (i: WeekState["items"][number]) => {
@@ -429,137 +415,67 @@ export class Family extends DurableObject<Env> {
       const n = needed.get(i.id);
       return n ? fmtAmount(n, i.unit) : "";
     };
-    const line = (i: WeekState["items"][number]) => `• ${i.name}${amount(i) ? ` : ${amount(i)}` : ""}`;
-    const out: string[] = [`🛒 *Popote · semaine du ${dayLabel(weekStart, 0)} au ${dayLabel(weekStart, 6)}*`];
+    const out: string[] = [`📅 <b>Semaine du vendredi ${dayLabel(weekStart, 0)} au jeudi ${dayLabel(weekStart, 6)}</b>`];
 
-    if (part !== "repas") {
-      const courses = st.items.filter((i) => i.source === "courses" && !i.checked);
-      out.push("", "*COURSES À FAIRE*");
-      if (!courses.length) out.push("Rien à acheter pour l'instant.");
-      for (const cat of CATEGORIES) {
-        const list = courses.filter((i) => i.category === cat.id).sort((a, b) => a.name.localeCompare(b.name, "fr"));
-        if (list.length) out.push("", `${cat.icon} *${cat.label}*`, ...list.map(line));
+    const courses = st.items.filter((i) => i.source === "courses" && !i.checked);
+    out.push("", "🛒 <b>COURSES À FAIRE</b>");
+    if (!courses.length) out.push("Rien à acheter.");
+    for (const cat of CATEGORIES) {
+      const list = courses.filter((i) => i.category === cat.id).sort((a, b) => a.name.localeCompare(b.name, "fr"));
+      if (list.length) out.push("", `${cat.icon} <i>${cat.label}</i>`, ...list.map((i) => `• ${esc(i.name)}${amount(i) ? ` : ${amount(i)}` : ""}`));
+    }
+
+    out.push("", "🍽️ <b>MENU</b>");
+    const active = st.slots.filter((s) => s.active);
+    if (!active.length) out.push("Aucun repas prévu.");
+    for (let day = 0; day < 7; day++) {
+      const rows: string[] = [];
+      for (const s of active.filter((x) => x.day === day)) {
+        const h = headcount(st, s.id);
+        const dishes = st.dishes.filter((x) => x.slot_id === s.id).map((x) => esc(dishTitle(st, x)));
+        rows.push(`${MEALS[s.meal]} · ${h.estimated ? "≈" : ""}${h.count} pers. : ${dishes.length ? dishes.join(" + ") : "<i>à définir</i>"}`);
+        if (!h.estimated) rows.push(`    <i>${esc(eatersLabel(h))}</i>`);
       }
+      if (rows.length) out.push("", `<b>${dayName(weekStart, day)} ${dayLabel(weekStart, day)}</b>`, ...rows);
     }
-    if (part !== "courses") {
-      out.push("", "🍽️ *REPAS DE LA SEMAINE*");
-      let any = false;
-      DAYS.forEach((d, day) => {
-        const rows: string[] = [];
-        for (const s of st.slots.filter((x) => x.active && x.day === day)) {
-          const dishes = st.dishes.filter((x) => x.slot_id === s.id);
-          if (!dishes.length) continue;
-          const h = headcount(st, s.id);
-          rows.push(`  ${MEALS[s.meal]} (${h.estimated ? "≈" : ""}${h.count} pers.) : ${dishes.map((x) => dishTitle(st, x)).join(" + ")}`);
-        }
-        if (rows.length) { any = true; out.push(`*${d} ${dayLabel(weekStart, day)}*`, ...rows); }
-      });
-      if (!any) out.push("Aucun plat prévu pour l'instant.");
-    }
-    return out.join("\n").slice(0, 4000); // limite WhatsApp : 4096 caractères
+    return out.join("\n");
   }
 
-  /** Appel à l'API WhatsApp Cloud. Renvoie le code d'erreur Meta en cas d'échec. */
-  async waApi(body: Body): Promise<{ ok: boolean; code?: number }> {
-    if (!this.env.WA_TOKEN || !this.env.WA_PHONE_ID) return { ok: false, code: -1 };
-    const base = this.env.WA_API_URL ?? "https://graph.facebook.com/v22.0";
-    try {
-      const res = await fetch(`${base}/${this.env.WA_PHONE_ID.trim()}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.env.WA_TOKEN.trim()}` },
-        body: JSON.stringify({ messaging_product: "whatsapp", ...body }),
-      });
-      const out = (await res.json().catch(() => ({}))) as { error?: { code?: number; message?: string } };
-      if (!res.ok) console.error("whatsapp", res.status, JSON.stringify(out.error ?? out));
-      return { ok: res.ok, code: out.error?.code };
-    } catch (e) {
-      console.error("whatsapp", e);
-      return { ok: false };
+  /** Découpe un long message en morceaux sous la limite Telegram (4 096 caractères), aux retours à la ligne. */
+  static chunks(text: string, max = 3900): string[] {
+    const parts: string[] = [];
+    let cur = "";
+    for (const line of text.split("\n")) {
+      if (cur && cur.length + line.length + 1 > max) { parts.push(cur); cur = ""; }
+      cur = cur ? `${cur}\n${line}` : line.slice(0, max);
     }
-  }
-  waText(to: string, text: string) {
-    return this.waApi({ to: to.replace(/^\+/, ""), type: "text", text: { body: text, preview_url: false } });
+    if (cur) parts.push(cur);
+    return parts;
   }
 
-  /**
-   * Envoi à des membres. Meta n'autorise un message libre que dans les 24 h qui suivent le dernier message
-   * de la personne au bot (erreur 131047 sinon) : on envoie alors le modèle approuvé, s'il est configuré.
-   */
-  async sendWeek(weekStart: string, recipients: Row[], title?: string) {
-    const text = (title ? `${title}\n\n` : "") + this.weekMessage(weekStart);
-    const sent: string[] = [], failed: string[] = [], expired: string[] = [];
-    for (const r of recipients) {
-      const res = await this.waText(String(r.phone), text);
-      if (res.ok) { sent.push(String(r.name)); continue; }
-      if (res.code === 131047 && this.env.WA_TEMPLATE) {
-        const t = await this.waApi({ to: String(r.phone).replace(/^\+/, ""), type: "template", template: { name: this.env.WA_TEMPLATE.trim(), language: { code: "fr" } } });
-        (t.ok ? sent : failed).push(String(r.name));
-      } else (res.code === 131047 ? expired : failed).push(String(r.name));
-    }
-    return { sent, failed, expired };
-  }
-
-  /** « M'envoyer » ou « Envoyer à toute la famille » depuis l'appli. */
-  async whatsappSend(req: Request) {
+  /** Bouton « Valider » : envoie au bot Telegram les courses et le menu des 3 semaines, un message par semaine. */
+  async validatePlan(req: Request) {
     const dev = await this.member(req);
     const b = (await req.json().catch(() => ({}))) as Body;
-    const week = this.weekParam(b.week);
-    if (!this.env.WA_TOKEN || !this.env.WA_PHONE_ID) throw new Bad("Le bot WhatsApp n'est pas encore configuré.", 503);
-    const recipients = b.to === "all"
-      ? this.q("SELECT * FROM whatsapp")
-      : this.q("SELECT * FROM whatsapp WHERE name_key = ?", nameKey(String(dev.name)));
-    if (!recipients.length) throw new Bad(b.to === "all" ? "Personne n'a encore activé WhatsApp." : "Enregistrez d'abord votre numéro dans l'onglet Semaine.");
-    return json(await this.sendWeek(week, recipients));
-  }
-
-  /** Jeudi 19 h (Paris) : courses et repas de la semaine suivante à ceux qui l'ont demandé, une seule fois par semaine. */
-  async weeklyWhatsapp() {
-    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Paris", weekday: "short", hour: "2-digit", hourCycle: "h23" })
-      .formatToParts(new Date()).map((p) => [p.type, p.value]));
-    if (parts.weekday !== "Thu" || parts.hour !== "19") return json({ skipped: "pas jeudi 19 h à Paris" });
-    if (!this.env.WA_TOKEN || !this.env.WA_PHONE_ID) return json({ skipped: "bot non configuré" });
-    const next = addDaysIso(mondayOf(new Date()), 7);
-    const key = `weekly_whatsapp_${next}`;
-    if (this.one("SELECT key FROM meta WHERE key = ?", key)) return json({ skipped: "déjà envoyé" });
-    this.sql.exec("INSERT INTO meta (key, value) VALUES (?, ?)", key, now());
-    return json(await this.sendWeek(next, this.q("SELECT * FROM whatsapp WHERE weekly = 1"), "📅 Pour la semaine prochaine"));
-  }
-
-  /** Vérification du webhook par Meta (une fois, lors de la configuration). */
-  waVerify(url: URL) {
-    const token = (this.env.WA_VERIFY_TOKEN ?? "").trim();
-    if (url.searchParams.get("hub.mode") === "subscribe" && token && safeEqual(url.searchParams.get("hub.verify_token") ?? "", token)) {
-      return new Response(url.searchParams.get("hub.challenge") ?? "", { status: 200 });
-    }
-    return json({ error: "forbidden" }, 403);
-  }
-
-  /** Messages reçus par le bot : « courses », « repas », « semaine prochaine »… */
-  async waWebhook(req: Request) {
-    const raw = await req.text();
-    const secret = this.env.WA_APP_SECRET?.trim();
-    if (!secret) return json({ error: "non configuré" }, 503);
-    const sig = (req.headers.get("X-Hub-Signature-256") ?? "").replace(/^sha256=/, "");
-    if (!safeEqual(sig, await hmac(secret, raw))) return json({ error: "forbidden" }, 403);
-
-    const body = JSON.parse(raw || "{}") as any;
-    for (const entry of body.entry ?? []) for (const change of entry.changes ?? []) {
-      for (const m of change.value?.messages ?? []) {
-        const from = String(m.from ?? "");
-        const text = String(m.text?.body ?? m.button?.text ?? m.interactive?.button_reply?.title ?? "").toLowerCase();
-        const member = this.q("SELECT * FROM whatsapp").find((r) => String(r.phone).replace(/^\+/, "") === from);
-        if (!member) {
-          await this.waText(from, "Bonjour ! Ce numéro n'est pas inscrit sur Popote. Ajoutez-le dans l'appli : onglet Semaine › WhatsApp.");
-          continue;
-        }
-        const thisWeek = mondayOf(new Date());
-        const week = /proch|suivant|recevoir/.test(text) ? addDaysIso(thisWeek, 7) : thisWeek;
-        const part = /course|liste|achat/.test(text) ? "courses" : /repas|menu|plat|manger/.test(text) ? "repas" : "all";
-        const help = "\n\n_Écrivez « courses », « repas » ou « semaine prochaine »._";
-        await this.waText(from, this.weekMessage(week, part) + help);
+    const first = this.weekParam(b.week);
+    const chat = (this.env.TELEGRAM_PLAN_CHAT_ID ?? "").trim() || this.admin;
+    if (!chat || !this.botToken) throw new Bad("Le bot Telegram n'est pas configuré.", 503);
+    const weeks = [0, 7, 14].map((n) => addDaysIso(first, n));
+    const head = await this.tg("sendMessage", {
+      chat_id: chat, parse_mode: "HTML",
+      text: `✅ <b>Planning validé par ${esc(String(dev.name))}</b>\nCourses et menus des 3 semaines, du vendredi ${dayLabel(first, 0)} au jeudi ${dayLabel(weeks[2], 6)}`,
+    });
+    if (!head.ok) throw new Bad("Telegram n'a pas accepté le message, réessayez.", 502);
+    const at = now();
+    for (const week of weeks) {
+      for (const text of Family.chunks(this.weekReport(week))) {
+        const r = await this.tg("sendMessage", { chat_id: chat, parse_mode: "HTML", text });
+        if (!r.ok) throw new Bad("Envoi interrompu, réessayez.", 502);
       }
+      this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", `validated_${week}`, JSON.stringify({ by: String(dev.name), at }));
+      this.notifyFamily(week);
     }
-    return json({ ok: true });
+    return json({ ok: true, weeks });
   }
 
   /** Repas d'une semaine (et plats déjà placés) pour le choix multi-repas sur 3 semaines. */
@@ -582,23 +498,46 @@ export class Family extends DurableObject<Env> {
     return names.length ? names.join(", ") : "Plat sans ingrédient";
   }
 
-  /** Plats déjà faits (toutes semaines), le plus récent par nom, avec leurs ingrédients par personne. */
-  library() {
-    const out: { name_key: string; name: string; ingredients: Row[] }[] = [];
-    const seen = new Set<string>();
-    for (const d of this.q("SELECT id FROM dishes ORDER BY created_at DESC LIMIT 400")) {
-      const ingredients = this.q(
-        `SELECT i.name, i.unit, i.source, i.category, di.qty_per_person FROM dish_ingredients di JOIN items i ON i.id = di.item_id
-         WHERE di.dish_id = ? ORDER BY di.rowid`, d.id,
-      ).map((r) => ({ ...r, name: String(r.name), category: catOf(r) }));
-      if (!ingredients.length) continue;
-      const key = ingredients.map((g) => nameKey(String(g.name))).sort().join("|");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ name_key: key, name: ingredients.map((g) => String(g.name)).join(", "), ingredients });
-      if (out.length >= 60) break;
+  /** Semaines enregistrées (sauf celle affichée), les plus récentes d'abord, avec leurs plats et ingrédients par personne. */
+  library(current: string) {
+    const out: { week_start: string; dishes: { day: number | null; meal: string | null; name: string; ingredients: Row[] }[] }[] = [];
+    const weeks = this.q(
+      `SELECT w.id, w.week_start FROM weeks w WHERE w.week_start != ? AND EXISTS (SELECT 1 FROM dishes d WHERE d.week_id = w.id)
+       ORDER BY w.week_start DESC LIMIT 30`, current);
+    for (const w of weeks) {
+      const dishes = this.q(
+        `SELECT d.id, s.day, s.meal FROM dishes d LEFT JOIN slots s ON s.id = d.slot_id WHERE d.week_id = ?
+         ORDER BY s.day IS NULL, s.day, s.meal DESC, d.created_at`, w.id,
+      ).map((d) => {
+        const ingredients = this.libraryIngredients(String(d.id));
+        return { day: d.day == null ? null : Number(d.day), meal: d.meal == null ? null : String(d.meal), name: ingredients.map((g) => String(g.name)).join(", "), ingredients };
+      }).filter((d) => d.ingredients.length);
+      if (dishes.length) out.push({ week_start: String(w.week_start), dishes });
     }
-    return out.sort((a, b) => a.name.localeCompare(b.name, "fr"));
+    return out;
+  }
+
+  libraryIngredients(dishId: string) {
+    return this.q(
+      `SELECT i.name, i.unit, i.source, i.category, di.qty_per_person FROM dish_ingredients di JOIN items i ON i.id = di.item_id
+       WHERE di.dish_id = ? ORDER BY di.rowid`, dishId,
+    ).map((r) => ({ ...r, name: String(r.name), category: catOf(r) }));
+  }
+
+  /** Crée un plat (ses ingrédients entrent dans les courses de sa semaine). */
+  createDish(wk: Row, slot: string | null, list: Body[]) {
+    const label = list.map((g) => str(g.name)).join(", ").slice(0, 80);
+    const dishId = uuid();
+    this.sql.exec("INSERT INTO dishes (id, week_id, name, slot_id, created_at) VALUES (?, ?, ?, ?, ?)", dishId, wk.id, label, slot, now());
+    for (const g of list) {
+      const itemId = this.addItem(wk, { name: g.name, unit: g.unit, source: g.source, category: g.category });
+      this.sql.exec(
+        `INSERT INTO dish_ingredients (id, dish_id, item_id, qty_per_person) VALUES (?, ?, ?, ?)
+         ON CONFLICT(dish_id, item_id) DO UPDATE SET qty_per_person = excluded.qty_per_person`,
+        uuid(), dishId, itemId, num(g.qty_per_person) ?? 0,
+      );
+    }
+    if (!this.touchedWeeks.includes(String(wk.week_start))) this.touchedWeeks.push(String(wk.week_start));
   }
 
   remember(weekStart: string, it: { name: string; source: string; unit: string; quantity: number | null; per_person: boolean; category: string }) {
@@ -711,7 +650,6 @@ export class Family extends DurableObject<Env> {
       case "dish.create": {
         const list = Array.isArray(b.ingredients) ? (b.ingredients as Body[]).slice(0, 40) : [];
         if (!list.length) throw new Bad("Ajoutez au moins un ingrédient");
-        const label = list.map((g) => str(g.name)).join(", ").slice(0, 80);
         // Repas choisis, sur cette semaine ou les 2 suivantes ; aucun = plat pas encore placé
         const targets = Array.isArray(b.targets) ? (b.targets as Body[]).slice(0, 42) : [];
         const allowed = [0, 7, 14].map((n) => addDaysIso(String(week.week_start), n));
@@ -723,18 +661,28 @@ export class Family extends DurableObject<Env> {
           if (!s) throw new Bad("Repas introuvable");
           return { wk, slot: String(s.id) };
         }) : [{ wk: week, slot: null }];
-        for (const { wk, slot } of places) {
-          const dishId = uuid();
-          this.sql.exec("INSERT INTO dishes (id, week_id, name, slot_id, created_at) VALUES (?, ?, ?, ?, ?)", dishId, wk.id, label, slot, now());
-          for (const g of list) {
-            const itemId = this.addItem(wk, { name: g.name, unit: g.unit, source: g.source, category: g.category });
-            this.sql.exec(
-              `INSERT INTO dish_ingredients (id, dish_id, item_id, qty_per_person) VALUES (?, ?, ?, ?)
-               ON CONFLICT(dish_id, item_id) DO UPDATE SET qty_per_person = excluded.qty_per_person`,
-              uuid(), dishId, itemId, num(g.qty_per_person) ?? 0,
-            );
+        for (const { wk, slot } of places) this.createDish(wk, slot, list);
+        return;
+      }
+      // Reprendre toute une semaine enregistrée : chaque plat retrouve le même jour (vendredi → vendredi) et le même repas
+      case "week.copy": {
+        const from = this.one("SELECT * FROM weeks WHERE week_start = ?", this.weekParamAny(b.from));
+        if (!from) throw new Bad("Semaine introuvable");
+        const ws = this.weekParam(b.to);
+        if (![0, 7, 14].map((n) => addDaysIso(String(week.week_start), n)).includes(ws)) throw new Bad("Semaine hors des 3 semaines");
+        const to = this.ensureWeek(ws);
+        const dishes = this.q("SELECT d.id, s.day, s.meal FROM dishes d LEFT JOIN slots s ON s.id = d.slot_id WHERE d.week_id = ? ORDER BY d.created_at", from.id);
+        for (const d of dishes) {
+          const list = this.libraryIngredients(String(d.id)) as unknown as Body[];
+          if (!list.length) continue;
+          let slot: string | null = null;
+          if (d.day != null) {
+            const wd = weekdayOf(String(from.week_start), Number(d.day));
+            const day = [0, 1, 2, 3, 4, 5, 6].find((i) => weekdayOf(ws, i) === wd)!;
+            const s = this.one("SELECT id, active FROM slots WHERE week_id = ? AND day = ? AND meal = ?", to.id, day, String(d.meal));
+            if (s && bool(s.active)) slot = String(s.id);
           }
-          this.touchedWeeks.push(String(wk.week_start));
+          this.createDish(to, slot, list);
         }
         return;
       }
@@ -748,22 +696,6 @@ export class Family extends DurableObject<Env> {
         );
         return;
       }
-      // WhatsApp : chacun enregistre son propre numéro (seuls ces numéros peuvent interroger le bot)
-      case "wa.set": {
-        const phone = typeof b.phone === "string" ? b.phone.replace(/[\s.()-]/g, "") : "";
-        if (!/^\+\d{8,15}$/.test(phone)) throw new Bad("Numéro au format international, ex. +33612345678");
-        const apikey = "";
-        this.sql.exec(
-          `INSERT INTO whatsapp (name_key, name, phone, apikey, weekly, created_at) VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(name_key) DO UPDATE SET name = excluded.name, phone = excluded.phone, apikey = excluded.apikey, weekly = excluded.weekly`,
-          nameKey(me), me, phone, apikey, b.weekly === false ? 0 : 1, now(),
-        );
-        return;
-      }
-      case "wa.weekly":
-        return this.sql.exec("UPDATE whatsapp SET weekly = ? WHERE name_key = ?", b.weekly === true ? 1 : 0, nameKey(me));
-      case "wa.delete":
-        return this.sql.exec("DELETE FROM whatsapp WHERE name_key = ?", nameKey(me));
       case "staple.delete":
         return this.sql.exec("DELETE FROM staples WHERE name_key = ?", str(b.name_key));
       case "ing.exclude": {

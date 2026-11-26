@@ -44,11 +44,14 @@ export const DEFAULT_STAPLES: [string, Theme, number, string][] = [
   ["Coriandre", "epice", 1, "c. à c."], ["Paprika", "epice", 0.5, "c. à c."],
 ];
 
-export interface LibraryDish { name_key: string; name: string; ingredients: DraftIngredient[] }
+/** Plat d'une semaine enregistrée : jour (index dans sa semaine) et repas d'origine, ingrédients par personne. */
+export interface LibraryDish { day: number | null; meal: Meal | null; name: string; ingredients: DraftIngredient[] }
+/** Semaine enregistrée avec ses plats, réutilisable telle quelle ou plat par plat. */
+export interface LibraryWeek { week_start: string; dishes: LibraryDish[] }
 
 export interface WeekState {
-  week: Week; slots: Slot[]; attendance: Attendance[]; items: Item[]; dishes: Dish[]; ingredients: DishIngredient[]; recents: Recent[]; library: LibraryDish[]; exclusions: Exclusion[]; plan: PlanWeek[]; staples: Staple[];
-  whatsapp: { me: { phone: string; weekly: boolean } | null; members: string[]; bot: string | null };
+  week: Week; slots: Slot[]; attendance: Attendance[]; items: Item[]; dishes: Dish[]; ingredients: DishIngredient[]; recents: Recent[]; library: LibraryWeek[]; exclusions: Exclusion[]; plan: PlanWeek[]; staples: Staple[];
+  validated: { by: string; at: string } | null;
 }
 
 /* ---------- Rayons des courses ---------- */
@@ -83,14 +86,15 @@ export function guessCategory(name: string): Category {
   return "autre";
 }
 
-export const DAYS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
+/** La semaine Popote va du vendredi (jour des courses) au jeudi. */
+export const DAYS = ["Vendredi", "Samedi", "Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi"];
 export const MEALS: Record<Meal, string> = { lunch: "Midi", dinner: "Soir" };
 export const UNITS = ["", "g", "kg", "ml", "cl", "L", "pièce", "tranche", "c. à s.", "c. à c.", "pincée", "gousse", "cube", "boîte", "paquet", "botte"];
 
-/** Lundi (YYYY-MM-DD) de la semaine contenant `d`, en heure locale. */
-export function mondayOf(d: Date = new Date()): string {
+/** Vendredi (YYYY-MM-DD) qui ouvre la semaine Popote contenant `d`, en heure locale. */
+export function weekStartOf(d: Date = new Date()): string {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+  x.setDate(x.getDate() - ((x.getDay() + 2) % 7));
   return isoDate(x);
 }
 export function isoDate(d: Date): string {
@@ -100,11 +104,22 @@ export function addDays(iso: string, n: number): string {
   const [y, m, d] = iso.split("-").map(Number);
   return isoDate(new Date(y, m - 1, d + n));
 }
-export function isMonday(iso: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false;
+function parseIso(iso: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
   const [y, m, d] = iso.split("-").map(Number);
   const x = new Date(y, m - 1, d);
-  return x.getDate() === d && x.getDay() === 1;
+  return x.getDate() === d ? x : null;
+}
+export function isWeekStart(iso: string): boolean {
+  return parseIso(iso)?.getDay() === 5;
+}
+/** Jour de la semaine réel (0 = dimanche) du jour `day` d'une semaine commençant à `weekStart`. */
+export function weekdayOf(weekStart: string, day: number): number {
+  return ((parseIso(weekStart)?.getDay() ?? 5) + day) % 7;
+}
+/** Nom du jour d'après la date réelle (les anciennes semaines commençaient le lundi). */
+export function dayName(weekStart: string, day: number): string {
+  return ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"][weekdayOf(weekStart, day)];
 }
 export function dayLabel(weekStart: string, day: number): string {
   const [y, m, d] = addDays(weekStart, day).split("-").map(Number);

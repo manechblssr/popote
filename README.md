@@ -11,7 +11,9 @@ Courses, placard et repas de la semaine, en famille. Application web mobile-firs
 - **Semaine** : nombre de personnes par défaut, créneaux (*Midi et soir*, *Soir uniquement* ou au cas par cas), convives ajustables par repas.
 - **Courses** : *Courses* + *Placard*, quantités fixes ou par personne, cochage en rayon, **ingrédients récents** réinjectables en un toucher.
 - **Plats** : ingrédients piochés dans les courses et le placard, quantité par personne, total calculé selon les convives du créneau.
-- **Planning** : lundi → dimanche, créneaux actifs, plat, convives, quantités exactes.
+- **Semaines enregistrées** : chaque semaine passée se reprend en entier (même jour, même repas) ou plat par plat.
+- **Planning** : vendredi (jour des courses) → jeudi, créneaux actifs, plat, convives, quantités exactes.
+- **Valider** : envoie au bot Telegram les courses et le menu des 3 semaines à venir, un message par semaine.
 
 ## Mise en place
 
@@ -29,6 +31,7 @@ npx wrangler secret put TELEGRAM_BOT_TOKEN --config worker/wrangler.toml
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | secret Worker | Token donné par @BotFather |
 | `TELEGRAM_ADMIN_CHAT_ID` | secret Worker | Votre identifiant Telegram (réponse à `/id`) |
+| `TELEGRAM_PLAN_CHAT_ID` | Worker, facultatif | Conversation qui reçoit le planning validé (ex. un groupe où le bot est ajouté) ; sinon celle de l'administrateur |
 | `ALLOWED_ORIGINS` | `worker/wrangler.toml` | Sites autorisés à appeler l'API |
 | `API_URL` | variable GitHub Actions | URL du Worker, injectée dans le site |
 

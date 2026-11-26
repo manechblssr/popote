@@ -3,7 +3,6 @@ import { headcount } from "@/lib/compute";
 import { DAYS, MEALS, dayLabel, nameKey, type Meal, type WeekState } from "@/lib/types";
 import type { Mutate } from "./App";
 import { Stepper } from "./ui";
-import WhatsApp from "./WhatsApp";
 
 const MEAL_ORDER: Meal[] = ["lunch", "dinner"];
 
@@ -92,8 +91,6 @@ export default function Settings({ state, mutate, me, onDone }: { state: WeekSta
           <Stepper label="Convives estimés" value={week.default_people} onChange={(v) => mutate("week.update", { default_people: v })} />
         </div>
       </section>
-
-      <WhatsApp state={state} mutate={mutate} />
 
       <button className="btn btn-primary btn-block" onClick={finish}>
         {week.configured ? "Passer aux courses" : `Valider ${active.length} repas et passer aux courses`}

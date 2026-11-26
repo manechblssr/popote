@@ -6,9 +6,9 @@ compatibility_date = "2026-11-01"
 # Origines autorisées à appeler l'API (séparées par des virgules)
 ALLOWED_ORIGINS = "https://manechblssr.github.io,http://localhost:3000"
 
-# Jeudi 17 h et 18 h UTC = 19 h à Paris en été ou en hiver (le code ne garde que 19 h, heure de Paris)
+# Aucune tâche planifiée : l'envoi Telegram se fait avec le bouton « Valider »
 [triggers]
-crons = ["0 17,18 * * 4"]
+crons = []
 
 [[durable_objects.bindings]]
 name = "FAMILY"
@@ -18,4 +18,4 @@ class_name = "Family"
 tag = "v1"
 new_sqlite_classes = ["Family"]
 
-# Secrets (wrangler secret put …) : TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID
+# Secrets (wrangler secret put …) : TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_PLAN_CHAT_ID (facultatif)

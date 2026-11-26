@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, live } from "@/lib/api";
-import { addDays, dayLabel, mondayOf, type WeekState } from "@/lib/types";
+import { addDays, dayLabel, weekStartOf, type WeekState } from "@/lib/types";
 import Settings from "./Settings";
 import Shopping from "./Shopping";
 import Dishes from "./Dishes";
@@ -21,7 +21,7 @@ function normalize(d: Partial<WeekState> & { week: WeekState["week"] }): WeekSta
     exclusions: d.exclusions ?? [],
     plan: d.plan ?? [],
     staples: d.staples ?? [],
-    whatsapp: d.whatsapp ?? { me: null, members: [], bot: null },
+    validated: d.validated ?? null,
   };
 }
 
@@ -35,7 +35,7 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
 ];
 
 export default function App({ userName, onLogout }: { userName: string; onLogout: () => void }) {
-  const [week, setWeek] = useState(() => mondayOf());
+  const [week, setWeek] = useState(() => weekStartOf());
   const [state, setState] = useState<WeekState | null>(null);
   const [tab, setTab] = useState<Tab | null>(null);
   const [error, setError] = useState("");
@@ -84,7 +84,7 @@ export default function App({ userName, onLogout }: { userName: string; onLogout
     if (confirm("Se déconnecter de cet appareil ?")) onLogout();
   }
 
-  const current = mondayOf();
+  const current = weekStartOf();
   return (
     <div className="shell">
       <header className="topbar">

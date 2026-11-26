@@ -4,6 +4,7 @@ import { IngredientLine } from "./Dishes";
 import { DAYS, MEALS, dayLabel, nameKey, type WeekState } from "@/lib/types";
 import type { Mutate } from "./App";
 import { Empty, Stepper } from "./ui";
+import Validate from "./Validate";
 
 export default function Planning({ state, mutate, me }: { state: WeekState; mutate: Mutate; me: string }) {
   const { week, slots, dishes, ingredients, attendance } = state;
@@ -61,6 +62,7 @@ export default function Planning({ state, mutate, me }: { state: WeekState; muta
           </section>
         );
       })}
+      <Validate state={state} />
     </div>
   );
 }

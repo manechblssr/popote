@@ -2,11 +2,12 @@
 import { useMemo, useRef, useState } from "react";
 import { dishTitle, excludedFor, headcount, ingredientPeople } from "@/lib/compute";
 import {
-  DAYS, MEALS, THEMES, UNITS, dayLabel, fmtAmount, guessCategory, nameKey,
-  type Dish, type DishIngredient, type DraftIngredient, type Meal, type Theme, type WeekState,
+  DAYS, MEALS, THEMES, UNITS, dayLabel, dayName, fmtAmount, guessCategory, nameKey,
+  type Dish, type DishIngredient, type DraftIngredient, type LibraryWeek, type Meal, type Theme, type WeekState,
 } from "@/lib/types";
 import type { Mutate } from "./App";
 import { Empty } from "./ui";
+import Validate from "./Validate";
 
 const MEAL_ORDER: Meal[] = ["lunch", "dinner"];
 const WEEK_LABELS = ["Cette semaine", "Semaine prochaine", "Dans 2 semaines"];
@@ -21,9 +22,9 @@ function useOptions(state: WeekState) {
   return useMemo(() => {
     // Quantité par personne déjà utilisée dans un plat passé, pour pré-remplir
     const lastQty = new Map<string, { q: number; unit: string }>();
-    state.library.forEach((d) => d.ingredients.forEach((g) => {
+    state.library.forEach((w) => w.dishes.forEach((d) => d.ingredients.forEach((g) => {
       if (g.qty_per_person && !lastQty.has(nameKey(g.name))) lastQty.set(nameKey(g.name), { q: g.qty_per_person, unit: g.unit });
-    }));
+    })));
     const market: Option[] = state.items.filter((i) => i.source === "courses").map((i) => {
       const k = nameKey(i.name);
       return { key: k, name: i.name, unit: i.unit || lastQty.get(k)?.unit || "", qty_per_person: lastQty.get(k)?.q ?? 0, source: "courses", category: i.category };
@@ -220,20 +221,10 @@ export default function Dishes({ state, mutate, me }: { state: WeekState; mutate
 
       {state.library.length > 0 && (
         <section className="panel">
-          <h2>Plats déjà faits</h2>
-          <p className="muted">Reprenez un plat : ses ingrédients sont recopiés ci-dessus, modifiables avant de le créer.</p>
-          <ul className="library">
-            {state.library.map((d) => (
-              <li key={d.name_key}>
-                <div>
-                  <strong>{d.name}</strong>
-                  <span className="muted small">
-                    {d.ingredients.map((g) => (g.qty_per_person ? `${g.name} ${fmtAmount(g.qty_per_person, g.unit)}` : g.name)).join(" · ")} par pers.
-                  </span>
-                </div>
-                <button className="btn btn-ghost small" onClick={() => reuse(d.ingredients)}>Reprendre</button>
-              </li>
-            ))}
+          <h2>Semaines enregistrées</h2>
+          <p className="muted">Reprenez une semaine entière (chaque plat retrouve son jour et son repas) ou un seul plat, modifiable avant de le créer.</p>
+          <ul className="weeks-saved">
+            {state.library.map((w) => <SavedWeek key={w.week_start} week={w} state={state} mutate={mutate} onReuse={reuse} />)}
           </ul>
         </section>
       )}
@@ -241,7 +232,60 @@ export default function Dishes({ state, mutate, me }: { state: WeekState; mutate
       <h2 className="section-title">Plats de la semaine</h2>
       {dishes.length === 0 && <Empty>Aucun plat cette semaine. Composez-en un ci-dessus ou reprenez un plat déjà fait.</Empty>}
       {dishes.map((d) => <DishCard key={d.id} dish={d} state={state} mutate={mutate} me={me} />)}
+
+      <Validate state={state} />
     </div>
+  );
+}
+
+/** Semaine enregistrée : ses plats jour par jour, à reprendre en entier ou un par un. */
+function SavedWeek({ week, state, mutate, onReuse }: { week: LibraryWeek; state: WeekState; mutate: Mutate; onReuse: (g: DraftIngredient[]) => void }) {
+  const [choosing, setChoosing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const ws = week.week_start;
+  async function copy(to: string) {
+    setBusy(true);
+    const ok = await mutate("week.copy", { from: ws, to });
+    setBusy(false);
+    if (ok) setChoosing(false);
+  }
+  return (
+    <li>
+      <details>
+        <summary>
+          <strong>Semaine du {dayName(ws, 0).toLowerCase()} {dayLabel(ws, 0)}</strong>
+          <span className="muted small"> · {week.dishes.length} plat{week.dishes.length > 1 ? "s" : ""}</span>
+        </summary>
+        <ul className="library">
+          {week.dishes.map((d, i) => (
+            <li key={i}>
+              <div>
+                <strong>{d.day == null ? "Pas placé" : `${dayName(ws, d.day)} ${d.meal ? MEALS[d.meal].toLowerCase() : ""}`}</strong>
+                <span className="muted small">
+                  {d.ingredients.map((g) => (g.qty_per_person ? `${g.name} ${fmtAmount(g.qty_per_person, g.unit)}` : g.name)).join(" · ")} par pers.
+                </span>
+              </div>
+              <button className="btn btn-ghost small" onClick={() => onReuse(d.ingredients)}>Reprendre</button>
+            </li>
+          ))}
+        </ul>
+        {choosing ? (
+          <div className="copy-to">
+            <p className="small"><b>Recopier tous ces plats sur :</b></p>
+            <div className="addrow">
+              {state.plan.map((p, i) => (
+                <button key={p.week_start} className="btn btn-ghost small" disabled={busy} onClick={() => copy(p.week_start)}>
+                  {WEEK_LABELS[i]} <small>({dayLabel(p.week_start, 0)})</small>
+                </button>
+              ))}
+            </div>
+            <button className="linkbtn" onClick={() => setChoosing(false)}>Annuler</button>
+          </div>
+        ) : (
+          <button className="btn btn-primary small" onClick={() => setChoosing(true)}>Reprendre toute la semaine</button>
+        )}
+      </details>
+    </li>
   );
 }
 
